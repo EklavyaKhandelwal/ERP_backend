@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "password_reset_tokens_one_active_user_idx" ON "password_reset_tokens" USING btree ("user_id") WHERE "password_reset_tokens"."consumed_at" is null;

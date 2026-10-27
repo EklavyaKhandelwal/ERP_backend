@@ -1,0 +1,32 @@
+CREATE TABLE "employees" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"employee_number" serial NOT NULL,
+	"user_id" uuid,
+	"first_name" text NOT NULL,
+	"last_name" text NOT NULL,
+	"email" text NOT NULL,
+	"phone" text DEFAULT '' NOT NULL,
+	"avatar" text DEFAULT '/favicon.svg' NOT NULL,
+	"role" text DEFAULT 'employee' NOT NULL,
+	"department" text NOT NULL,
+	"designation" text NOT NULL,
+	"join_date" text NOT NULL,
+	"status" text DEFAULT 'Active' NOT NULL,
+	"salary" numeric(12, 2) DEFAULT 0 NOT NULL,
+	"location" text DEFAULT 'Remote' NOT NULL,
+	"manager" text DEFAULT '' NOT NULL,
+	"skills" text[] DEFAULT '{}' NOT NULL,
+	"annual_leave" integer DEFAULT 20 NOT NULL,
+	"annual_leave_total" integer DEFAULT 20 NOT NULL,
+	"sick_leave" integer DEFAULT 10 NOT NULL,
+	"sick_leave_total" integer DEFAULT 10 NOT NULL,
+	"casual_leave" integer DEFAULT 6 NOT NULL,
+	"casual_leave_total" integer DEFAULT 6 NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "employees_employee_number_unique" UNIQUE("employee_number"),
+	CONSTRAINT "employees_user_id_unique" UNIQUE("user_id"),
+	CONSTRAINT "employees_email_unique" UNIQUE("email")
+);
+--> statement-breakpoint
+ALTER TABLE "employees" ADD CONSTRAINT "employees_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;
