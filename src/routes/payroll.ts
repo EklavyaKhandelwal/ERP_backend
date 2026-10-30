@@ -35,10 +35,12 @@ async function getUser(request: FastifyRequest, reply: FastifyReply): Promise<Pu
 async function shapeRecords(records: Array<typeof payrollRecords.$inferSelect>) {
   if (!records.length) return [];
   const employeeIds = [...new Set(records.map(record => record.employeeId))];
-  const employeeRecords = await db.select().from(employees).where(inArray(employees.id, employeeIds));
-  const employeesById = new Map(employeeRecords.map(employee => [employee.id, employee]));
   const runIds = [...new Set(records.map(record => record.runId))];
-  const runRecords = await db.select().from(payrollRuns).where(inArray(payrollRuns.id, runIds));
+  const [employeeRecords, runRecords] = await Promise.all([
+    db.select().from(employees).where(inArray(employees.id, employeeIds)),
+    db.select().from(payrollRuns).where(inArray(payrollRuns.id, runIds)),
+  ]);
+  const employeesById = new Map(employeeRecords.map(employee => [employee.id, employee]));
   const runsById = new Map(runRecords.map(run => [run.id, run]));
 
   return records.map(record => {

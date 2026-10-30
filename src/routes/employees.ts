@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
 import { db } from '../db/index.js';
-import { accountAccessTokens, employees, sessions, users } from '../db/schema.js';
+import { accountAccessTokens, employeeLeaveBalances, employees, leavePolicies, projectMembers, projects, sessions, users } from '../db/schema.js';
 
 const employeeStatus = z.enum(['Active', 'On Leave', 'Probation', 'Inactive']);
 const employeeInput = z.object({
@@ -25,7 +25,12 @@ const employeeInput = z.object({
 
 type EmployeeRecord = typeof employees.$inferSelect;
 
-function toEmployee(employee: EmployeeRecord, accountStatus: 'Not set up' | 'Invitation pending' | 'Active' | 'Deactivated' | 'Admin account') {
+function toEmployee(
+  employee: EmployeeRecord,
+  accountStatus: 'Not set up' | 'Invitation pending' | 'Active' | 'Deactivated' | 'Admin account',
+  includeAccountStatus = true,
+  leaveBalance?: typeof employeeLeaveBalances.$inferSelect,
+) {
   return {
     id: employee.id,
     employeeCode: `EMP-${String(employee.employeeNumber).padStart(4, '0')}`,
@@ -33,6 +38,7 @@ function toEmployee(employee: EmployeeRecord, accountStatus: 'Not set up' | 'Inv
     lastName: employee.lastName,
     email: employee.email,
     phone: employee.phone,
+    dateOfBirth: employee.dateOfBirth,
     avatar: employee.avatar,
     role: employee.role,
     department: employee.department,
@@ -44,34 +50,86 @@ function toEmployee(employee: EmployeeRecord, accountStatus: 'Not set up' | 'Inv
     manager: employee.manager,
     skills: employee.skills,
     leaveBalance: {
-      annual: employee.annualLeave,
-      annualTotal: employee.annualLeaveTotal,
-      sick: employee.sickLeave,
-      sickTotal: employee.sickLeaveTotal,
-      casual: employee.casualLeave,
-      casualTotal: employee.casualLeaveTotal,
+      year: leaveBalance?.year ?? new Date().getFullYear(),
+      annual: leaveBalance?.annualBalance ?? employee.annualLeave,
+      annualTotal: leaveBalance?.annualTotal ?? employee.annualLeaveTotal,
+      sick: leaveBalance?.sickBalance ?? employee.sickLeave,
+      sickTotal: leaveBalance?.sickTotal ?? employee.sickLeaveTotal,
+      casual: leaveBalance?.casualBalance ?? employee.casualLeave,
+      casualTotal: leaveBalance?.casualTotal ?? employee.casualLeaveTotal,
     },
-    accountStatus,
+    ...(includeAccountStatus ? { accountStatus } : {}),
   };
 }
 
-async function toEmployees(records: EmployeeRecord[]) {
+function toDirectoryEmployee(employee: EmployeeRecord) {
+  return {
+    id: employee.id,
+    employeeCode: `EMP-${String(employee.employeeNumber).padStart(4, '0')}`,
+    firstName: employee.firstName,
+    lastName: employee.lastName,
+    email: employee.email,
+    avatar: employee.avatar,
+    role: employee.role,
+    department: employee.department,
+    designation: employee.designation,
+    joinDate: employee.joinDate,
+    status: employee.status,
+    location: employee.location,
+    manager: employee.manager,
+    skills: employee.skills,
+  };
+}
+
+async function toEmployees(records: EmployeeRecord[], includeAccountStatus = true) {
   if (!records.length) return [];
   const userIds = records.flatMap(employee => employee.userId ? [employee.userId] : []);
-  const linkedUsers = userIds.length
-    ? await db.select({ id: users.id, isActive: users.isActive, role: users.role }).from(users).where(inArray(users.id, userIds))
-    : [];
-  const usersById = new Map(linkedUsers.map(user => [user.id, user]));
   const unlinkedEmployeeIds = records.filter(employee => !employee.userId).map(employee => employee.id);
-  const pendingTokens = unlinkedEmployeeIds.length
-    ? await db.select({ employeeId: accountAccessTokens.employeeId }).from(accountAccessTokens)
+  const employeeIds = records.map(employee => employee.id);
+  const currentYear = new Date().getFullYear();
+  const [linkedUsers, pendingTokens, existingBalances] = await Promise.all([
+    userIds.length
+      ? db.select({ id: users.id, isActive: users.isActive, role: users.role }).from(users).where(inArray(users.id, userIds))
+      : Promise.resolve([]),
+    unlinkedEmployeeIds.length
+      ? db.select({ employeeId: accountAccessTokens.employeeId }).from(accountAccessTokens)
+        .where(and(
+          inArray(accountAccessTokens.employeeId, unlinkedEmployeeIds),
+          isNull(accountAccessTokens.consumedAt),
+          gt(accountAccessTokens.expiresAt, new Date()),
+        ))
+      : Promise.resolve([]),
+    db.select().from(employeeLeaveBalances)
       .where(and(
-        inArray(accountAccessTokens.employeeId, unlinkedEmployeeIds),
-        isNull(accountAccessTokens.consumedAt),
-        gt(accountAccessTokens.expiresAt, new Date()),
-      ))
-    : [];
+        inArray(employeeLeaveBalances.employeeId, employeeIds),
+        eq(employeeLeaveBalances.year, currentYear),
+      )),
+  ]);
+  const usersById = new Map(linkedUsers.map(user => [user.id, user]));
   const pendingIds = new Set(pendingTokens.map(token => token.employeeId));
+
+  let yearBalances = existingBalances;
+  const balanceIds = new Set(yearBalances.map(balance => balance.employeeId));
+  const missingBalances = records.filter(employee => !balanceIds.has(employee.id));
+  if (missingBalances.length > 0) {
+    const [policy] = await db.select().from(leavePolicies).where(eq(leavePolicies.id, 1)).limit(1);
+    await db.insert(employeeLeaveBalances).values(missingBalances.map(employee => ({
+      employeeId: employee.id,
+      year: currentYear,
+      annualBalance: policy?.annualDays ?? 20,
+      annualTotal: policy?.annualDays ?? 20,
+      sickBalance: policy?.sickDays ?? 10,
+      sickTotal: policy?.sickDays ?? 10,
+      casualBalance: policy?.casualDays ?? 6,
+      casualTotal: policy?.casualDays ?? 6,
+    }))).onConflictDoNothing();
+    yearBalances = await db.select().from(employeeLeaveBalances)
+      .where(and(
+        inArray(employeeLeaveBalances.employeeId, employeeIds),
+        eq(employeeLeaveBalances.year, currentYear),
+      ));
+  }
+  const balancesByEmployee = new Map(yearBalances.map(balance => [balance.employeeId, balance]));
 
   return records.map(employee => {
     const linkedUser = employee.userId ? usersById.get(employee.userId) : undefined;
@@ -80,7 +138,7 @@ async function toEmployees(records: EmployeeRecord[]) {
       : linkedUser
       ? linkedUser.isActive ? 'Active' : 'Deactivated'
       : pendingIds.has(employee.id) ? 'Invitation pending' : 'Not set up';
-    return toEmployee(employee, accountStatus);
+    return toEmployee(employee, accountStatus, includeAccountStatus, balancesByEmployee.get(employee.id));
   });
 }
 async function getUser(request: FastifyRequest, reply: FastifyReply): Promise<PublicUser | null> {
@@ -107,11 +165,49 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     const user = await getUser(request, reply);
     if (!user) return reply;
 
-    const records = user.role === 'admin'
-      ? await db.select().from(employees).orderBy(asc(employees.lastName), asc(employees.firstName))
-      : await db.select().from(employees).where(eq(employees.userId, user.id));
+    const records = await db.select().from(employees).orderBy(asc(employees.lastName), asc(employees.firstName));
 
-    return { employees: await toEmployees(records) };
+    if (user.role === 'admin') {
+      return { employees: await toEmployees(records) };
+    }
+
+    const ownRecords = records.filter(record => record.userId === user.id);
+    const ownEmployees = await toEmployees(ownRecords, false);
+    const ownEmployee = ownEmployees[0];
+    return {
+      employees: records.map(record => (
+        record.userId === user.id && ownEmployee ? ownEmployee : toDirectoryEmployee(record)
+      )),
+    };
+  });
+
+  app.get('/:id/projects', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await getUser(request, reply);
+    if (!user) return reply;
+
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid employee ID.' });
+
+    const [employee] = await db.select({ id: employees.id }).from(employees)
+      .where(eq(employees.id, params.data.id)).limit(1);
+    if (!employee) return reply.code(404).send({ error: 'Employee not found.' });
+
+    const assignedProjects = await db.select({
+      id: projects.id,
+      name: projects.name,
+      code: projects.code,
+      status: projects.status,
+      progress: projects.progress,
+      deadline: projects.deadline,
+      role: projectMembers.role,
+    })
+      .from(projectMembers)
+      .innerJoin(projects, eq(projectMembers.projectId, projects.id))
+      .where(eq(projectMembers.employeeId, employee.id))
+      .orderBy(asc(projects.deadline), asc(projects.name));
+
+    return { projects: assignedProjects };
   });
 
   app.get('/:id', async (request, reply) => {
@@ -123,13 +219,17 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     if (!params.success) return reply.code(400).send({ error: 'Invalid employee ID.' });
 
     const [record] = await db.select().from(employees)
-      .where(user.role === 'admin'
-        ? eq(employees.id, params.data.id)
-        : and(eq(employees.id, params.data.id), eq(employees.userId, user.id)))
+      .where(eq(employees.id, params.data.id))
       .limit(1);
 
     if (!record) return reply.code(404).send({ error: 'Employee not found.' });
-    return { employee: (await toEmployees([record]))[0] };
+    if (user.role === 'admin') {
+      return { employee: (await toEmployees([record]))[0] };
+    }
+    if (record.userId === user.id) {
+      return { employee: (await toEmployees([record], false))[0] };
+    }
+    return { employee: toDirectoryEmployee(record) };
   });
 
   app.post('/', async (request, reply) => {
@@ -142,6 +242,7 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     }
 
     const data = parsed.data;
+    const [leavePolicy] = await db.select().from(leavePolicies).where(eq(leavePolicies.id, 1)).limit(1);
     const [matchingUser] = await db.select({ id: users.id, role: users.role })
       .from(users)
       .where(eq(users.email, data.email.toLowerCase()))
@@ -160,11 +261,34 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     }
 
     try {
-      const [record] = await db.insert(employees).values({
-        ...data,
-        email: data.email.toLowerCase(),
-        userId: matchingUser?.id ?? null,
-      }).returning();
+      const currentYear = new Date().getFullYear();
+      const annualDays = leavePolicy?.annualDays ?? 20;
+      const sickDays = leavePolicy?.sickDays ?? 10;
+      const casualDays = leavePolicy?.casualDays ?? 6;
+      const record = await db.transaction(async tx => {
+        const [created] = await tx.insert(employees).values({
+          ...data,
+          email: data.email.toLowerCase(),
+          userId: matchingUser?.id ?? null,
+          annualLeave: annualDays,
+          annualLeaveTotal: annualDays,
+          sickLeave: sickDays,
+          sickLeaveTotal: sickDays,
+          casualLeave: casualDays,
+          casualLeaveTotal: casualDays,
+        }).returning();
+        await tx.insert(employeeLeaveBalances).values({
+          employeeId: created.id,
+          year: currentYear,
+          annualBalance: annualDays,
+          annualTotal: annualDays,
+          sickBalance: sickDays,
+          sickTotal: sickDays,
+          casualBalance: casualDays,
+          casualTotal: casualDays,
+        });
+        return created;
+      });
       return reply.code(201).send({ employee: (await toEmployees([record]))[0] });
     } catch (error) {
       if (isUniqueViolation(error)) {

@@ -1,10 +1,11 @@
-import { and, asc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
 import { db } from '../db/index.js';
-import { employees, leaveRequests, notifications, users } from '../db/schema.js';
+import { employeeLeaveBalances, employees, leavePolicies, leavePolicyHistory, leaveRequests, users } from '../db/schema.js';
+import { insertUserNotifications } from '../notifications.js';
 
 const leaveType = z.enum([
   'Annual Leave',
@@ -32,15 +33,33 @@ const reviewSchema = z.object({
 type EmployeeRecord = typeof employees.$inferSelect;
 type LeaveRecord = typeof leaveRequests.$inferSelect;
 type LeaveBalance = {
+  year: number;
   annual: number;
   annualTotal: number;
+  annualPending: number;
   sick: number;
   sickTotal: number;
+  sickPending: number;
   casual: number;
   casualTotal: number;
+  casualPending: number;
 };
 
+type LeavePolicy = {
+  annual: number;
+  sick: number;
+  casual: number;
+};
+type YearBalanceRecord = typeof employeeLeaveBalances.$inferSelect;
+
+const leavePolicySchema = z.object({
+  annual: z.number().int().min(0).max(366),
+  sick: z.number().int().min(0).max(366),
+  casual: z.number().int().min(0).max(366),
+});
+
 const reviewer = alias(users, 'leave_reviewer');
+const policyChanger = alias(users, 'leave_policy_changer');
 
 function businessDays(startDate: string, endDate: string): number {
   const current = new Date(`${startDate}T00:00:00.000Z`);
@@ -56,39 +75,105 @@ function businessDays(startDate: string, endDate: string): number {
   return count;
 }
 
-function getBalance(employee: EmployeeRecord): LeaveBalance {
+function businessDaysForYear(startDate: string, endDate: string, year: number): number {
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+  const clippedStart = startDate > yearStart ? startDate : yearStart;
+  const clippedEnd = endDate < yearEnd ? endDate : yearEnd;
+  return clippedStart <= clippedEnd ? businessDays(clippedStart, clippedEnd) : 0;
+}
+
+function requestYears(startDate: string, endDate: string): number[] {
+  const firstYear = Number(startDate.slice(0, 4));
+  const lastYear = Number(endDate.slice(0, 4));
+  return Array.from({ length: lastYear - firstYear + 1 }, (_, index) => firstYear + index);
+}
+
+function getBalance(record: YearBalanceRecord, requests: LeaveRecord[] = []): LeaveBalance {
+  const pendingDays = (type: z.infer<typeof leaveType>) => requests
+    .filter(request => request.status === 'Pending' && request.leaveType === type)
+    .reduce((total, request) => total + businessDaysForYear(request.startDate, request.endDate, record.year), 0);
   return {
-    annual: employee.annualLeave,
-    annualTotal: employee.annualLeaveTotal,
-    sick: employee.sickLeave,
-    sickTotal: employee.sickLeaveTotal,
-    casual: employee.casualLeave,
-    casualTotal: employee.casualLeaveTotal,
+    year: record.year,
+    annual: record.annualBalance,
+    annualTotal: record.annualTotal,
+    annualPending: pendingDays('Annual Leave'),
+    sick: record.sickBalance,
+    sickTotal: record.sickTotal,
+    sickPending: pendingDays('Sick Leave'),
+    casual: record.casualBalance,
+    casualTotal: record.casualTotal,
+    casualPending: pendingDays('Casual Leave'),
   };
 }
 
-type BalanceField = 'annualLeave' | 'sickLeave' | 'casualLeave';
+function toLeavePolicy(record: typeof leavePolicies.$inferSelect): LeavePolicy {
+  return {
+    annual: record.annualDays,
+    sick: record.sickDays,
+    casual: record.casualDays,
+  };
+}
+
+async function getOrCreateLeavePolicy(): Promise<typeof leavePolicies.$inferSelect> {
+  await db.insert(leavePolicies).values({ id: 1 }).onConflictDoNothing();
+  const [policy] = await db.select().from(leavePolicies).where(eq(leavePolicies.id, 1)).limit(1);
+  if (!policy) throw new Error('Unable to load company leave policy.');
+  return policy;
+}
+
+type BalanceField = 'annualBalance' | 'sickBalance' | 'casualBalance';
 
 function balanceField(type: z.infer<typeof leaveType>): BalanceField | null {
   switch (type) {
     case 'Annual Leave':
-      return 'annualLeave';
+      return 'annualBalance';
     case 'Sick Leave':
-      return 'sickLeave';
+      return 'sickBalance';
     case 'Casual Leave':
-      return 'casualLeave';
+      return 'casualBalance';
     case 'Maternity/Paternity':
     case 'Unpaid Leave':
       return null;
   }
 }
 
-function availableBalance(employee: EmployeeRecord, field: BalanceField): number {
+function availableBalance(balance: YearBalanceRecord, field: BalanceField): number {
   switch (field) {
-    case 'annualLeave': return employee.annualLeave;
-    case 'sickLeave': return employee.sickLeave;
-    case 'casualLeave': return employee.casualLeave;
+    case 'annualBalance': return balance.annualBalance;
+    case 'sickBalance': return balance.sickBalance;
+    case 'casualBalance': return balance.casualBalance;
   }
+}
+
+async function getOrCreateYearBalance(employeeId: string, year: number): Promise<YearBalanceRecord> {
+  const [existing] = await db.select().from(employeeLeaveBalances)
+    .where(and(
+      eq(employeeLeaveBalances.employeeId, employeeId),
+      eq(employeeLeaveBalances.year, year),
+    ))
+    .limit(1);
+  if (existing) return existing;
+
+  const policy = await getOrCreateLeavePolicy();
+  await db.insert(employeeLeaveBalances).values({
+    employeeId,
+    year,
+    annualBalance: policy.annualDays,
+    annualTotal: policy.annualDays,
+    sickBalance: policy.sickDays,
+    sickTotal: policy.sickDays,
+    casualBalance: policy.casualDays,
+    casualTotal: policy.casualDays,
+  }).onConflictDoNothing();
+  const [created] = await db.select().from(employeeLeaveBalances)
+    .where(and(
+      eq(employeeLeaveBalances.employeeId, employeeId),
+      eq(employeeLeaveBalances.year, year),
+    ))
+    .limit(1);
+  if (!created) throw new Error(`Unable to initialize leave balances for ${year}.`);
+  return created;
 }
 
 function toLeaveRequest(
@@ -129,15 +214,99 @@ async function ownEmployee(userId: string): Promise<EmployeeRecord | null> {
 }
 
 export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
+  app.get('/policy', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await requireUser(request, reply);
+    if (!user) return reply;
+    return { policy: toLeavePolicy(await getOrCreateLeavePolicy()) };
+  });
+
+  app.get('/policy/history', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await requireUser(request, reply);
+    if (!user) return reply;
+    if (user.role !== 'admin') {
+      return reply.code(403).send({ error: 'Administrator access required.' });
+    }
+
+    const history = await db.select({
+      annual: leavePolicyHistory.annualDays,
+      sick: leavePolicyHistory.sickDays,
+      casual: leavePolicyHistory.casualDays,
+      changedBy: policyChanger.name,
+      changedAt: leavePolicyHistory.changedAt,
+    })
+      .from(leavePolicyHistory)
+      .leftJoin(policyChanger, eq(leavePolicyHistory.changedByUserId, policyChanger.id))
+      .orderBy(desc(leavePolicyHistory.changedAt))
+      .limit(10);
+    return { history };
+  });
+
+  app.put('/policy', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await requireUser(request, reply);
+    if (!user) return reply;
+    if (user.role !== 'admin') {
+      return reply.code(403).send({ error: 'Administrator access required.' });
+    }
+
+    const parsed = leavePolicySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Leave allowances must be whole numbers between 0 and 366.' });
+    }
+
+    await getOrCreateLeavePolicy();
+    const policy = await db.transaction(async tx => {
+      const [previous] = await tx.select().from(leavePolicies)
+        .where(eq(leavePolicies.id, 1))
+        .for('update')
+        .limit(1);
+      if (!previous) throw new Error('Company leave policy was not initialized.');
+      const next = parsed.data;
+      const changed = previous.annualDays !== next.annual
+        || previous.sickDays !== next.sick
+        || previous.casualDays !== next.casual;
+
+      const [updated] = await tx.update(leavePolicies)
+        .set({
+          annualDays: next.annual,
+          sickDays: next.sick,
+          casualDays: next.casual,
+          updatedByUserId: user.id,
+          updatedAt: new Date(),
+        })
+        .where(eq(leavePolicies.id, 1))
+        .returning();
+
+      await tx.update(employeeLeaveBalances).set({
+        annualBalance: sql`greatest(0, ${employeeLeaveBalances.annualBalance} + (${next.annual} - ${employeeLeaveBalances.annualTotal}))`,
+        annualTotal: next.annual,
+        sickBalance: sql`greatest(0, ${employeeLeaveBalances.sickBalance} + (${next.sick} - ${employeeLeaveBalances.sickTotal}))`,
+        sickTotal: next.sick,
+        casualBalance: sql`greatest(0, ${employeeLeaveBalances.casualBalance} + (${next.casual} - ${employeeLeaveBalances.casualTotal}))`,
+        casualTotal: next.casual,
+        updatedAt: new Date(),
+      }).where(gte(employeeLeaveBalances.year, new Date().getFullYear()));
+      if (changed) {
+        await tx.insert(leavePolicyHistory).values({
+          annualDays: next.annual,
+          sickDays: next.sick,
+          casualDays: next.casual,
+          changedByUserId: user.id,
+        });
+      }
+
+      return updated;
+    });
+
+    return { policy: toLeavePolicy(policy) };
+  });
+
   app.get('/', async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const user = await requireUser(request, reply);
     if (!user) return reply;
-
-    const ownProfile = await ownEmployee(user.id);
-    if (!ownProfile) {
-      return reply.code(403).send({ error: 'Your account does not have a linked employee profile.' });
-    }
 
     const query = db.select({
       leave: leaveRequests,
@@ -147,14 +316,24 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
       .from(leaveRequests)
       .innerJoin(employees, eq(leaveRequests.employeeId, employees.id))
       .leftJoin(reviewer, eq(leaveRequests.reviewedByUserId, reviewer.id));
-    const rows = user.role === 'admin'
-      ? await query.orderBy(asc(leaveRequests.startDate), asc(leaveRequests.createdAt))
-      : await query.where(eq(leaveRequests.employeeId, ownProfile.id))
+    let rows: Awaited<ReturnType<typeof query.orderBy>>;
+    let leaveBalance: LeaveBalance | null = null;
+    if (user.role === 'admin') {
+      rows = await query.orderBy(asc(leaveRequests.startDate), asc(leaveRequests.createdAt));
+    } else {
+      const ownProfile = await ownEmployee(user.id);
+      if (!ownProfile) {
+        return reply.code(403).send({ error: 'Your account does not have a linked employee profile.' });
+      }
+      rows = await query.where(eq(leaveRequests.employeeId, ownProfile.id))
         .orderBy(asc(leaveRequests.startDate), asc(leaveRequests.createdAt));
+      const currentYearBalance = await getOrCreateYearBalance(ownProfile.id, new Date().getFullYear());
+      leaveBalance = getBalance(currentYearBalance, rows.map(row => row.leave));
+    }
 
     return {
       leaves: rows.map(row => toLeaveRequest(row.leave, row.employee, row.reviewerName)),
-      leaveBalance: getBalance(ownProfile),
+      leaveBalance,
     };
   });
 
@@ -175,6 +354,17 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: 'The date range must include at least one weekday and be no longer than one year.' });
     }
 
+    const employeeProfile = await ownEmployee(user.id);
+    if (!employeeProfile) {
+      return reply.code(403).send({ error: 'Your account does not have a linked employee profile.' });
+    }
+    const currentYear = new Date().getFullYear();
+    const targetYears = requestYears(parsed.data.startDate, parsed.data.endDate);
+    const balanceYears = [...new Set([...targetYears, currentYear])];
+    for (const year of balanceYears) {
+      await getOrCreateYearBalance(employeeProfile.id, year);
+    }
+
     const result = await db.transaction(async tx => {
       const [employee] = await tx.select().from(employees)
         .where(eq(employees.userId, user.id))
@@ -182,19 +372,63 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
         .limit(1);
       if (!employee) return { error: 'Your account does not have a linked employee profile.' as const };
 
-      const overlapping = await tx.select({ id: leaveRequests.id }).from(leaveRequests)
+      const dateOverlaps = await tx.select({
+        leaveType: leaveRequests.leaveType,
+        startDate: leaveRequests.startDate,
+        endDate: leaveRequests.endDate,
+        status: leaveRequests.status,
+      }).from(leaveRequests)
         .where(and(
           eq(leaveRequests.employeeId, employee.id),
           inArray(leaveRequests.status, ['Pending', 'Approved']),
           lte(leaveRequests.startDate, parsed.data.endDate),
           gte(leaveRequests.endDate, parsed.data.startDate),
-        ))
-        .limit(1);
-      if (overlapping.length > 0) return { error: 'This request overlaps a pending or approved leave request.' as const };
+        ));
+      const overlapping = dateOverlaps.find(request => {
+        const overlapStart = request.startDate > parsed.data.startDate ? request.startDate : parsed.data.startDate;
+        const overlapEnd = request.endDate < parsed.data.endDate ? request.endDate : parsed.data.endDate;
+        return businessDays(overlapStart, overlapEnd) > 0;
+      });
+      if (overlapping) {
+        const formatDate = (date: string) => new Date(`${date}T00:00:00.000Z`).toLocaleDateString('en-IN', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+          timeZone: 'UTC',
+        });
+        return {
+          error: `This overlaps your ${overlapping.status.toLowerCase()} ${overlapping.leaveType} request (${formatDate(overlapping.startDate)}–${formatDate(overlapping.endDate)}).` as const,
+        };
+      }
 
+      const yearBalances = await tx.select().from(employeeLeaveBalances)
+        .where(and(
+          eq(employeeLeaveBalances.employeeId, employee.id),
+          inArray(employeeLeaveBalances.year, balanceYears),
+        ))
+        .for('update');
+      const balanceByYear = new Map(yearBalances.map(balance => [balance.year, balance]));
       const quota = balanceField(parsed.data.leaveType);
-      if (quota && days > availableBalance(employee, quota)) {
-        return { error: `Not enough ${parsed.data.leaveType.toLowerCase()} balance for this request.` as const };
+      if (quota) {
+        const pendingRequests = await tx.select().from(leaveRequests)
+          .where(and(
+            eq(leaveRequests.employeeId, employee.id),
+            eq(leaveRequests.leaveType, parsed.data.leaveType),
+            eq(leaveRequests.status, 'Pending'),
+          ));
+        for (const year of targetYears) {
+          const balance = balanceByYear.get(year);
+          if (!balance) throw new Error(`Leave balance for ${year} was not initialized.`);
+          const pendingDays = pendingRequests.reduce(
+            (total, request) => total + businessDaysForYear(request.startDate, request.endDate, year),
+            0,
+          );
+          const available = Math.max(0, availableBalance(balance, quota) - pendingDays);
+          const requestedDays = businessDaysForYear(parsed.data.startDate, parsed.data.endDate, year);
+          if (requestedDays > available) {
+            return { error: `Not enough ${parsed.data.leaveType.toLowerCase()} balance for ${year} after pending requests. ${available} day(s) are available.` as const };
+          }
+        }
       }
 
       const [record] = await tx.insert(leaveRequests).values({
@@ -205,16 +439,25 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
         days,
         reason: parsed.data.reason,
       }).returning();
+      const pendingRequests = await tx.select().from(leaveRequests)
+        .where(and(
+          eq(leaveRequests.employeeId, employee.id),
+          eq(leaveRequests.status, 'Pending'),
+        ));
+      const currentYearBalance = balanceByYear.get(currentYear);
+      if (!currentYearBalance) throw new Error(`Leave balance for ${currentYear} was not initialized.`);
 
       const admins = await tx.select({ id: users.id }).from(users).where(eq(users.role, 'admin'));
       if (admins.length > 0) {
-        await tx.insert(notifications).values(admins.map(admin => ({
-          userId: admin.id,
-          title: `${employee.firstName} ${employee.lastName} submitted a ${parsed.data.leaveType.toLowerCase()} request.`,
-        })));
+        await insertUserNotifications(
+          tx,
+          admins.map(admin => admin.id),
+          `${employee.firstName} ${employee.lastName} submitted a ${parsed.data.leaveType.toLowerCase()} request.`,
+          'leaveRequests',
+        );
       }
 
-      return { record, employee };
+      return { record, employee, pendingRequests, currentYearBalance };
     });
 
     if ('error' in result && result.error) {
@@ -224,7 +467,7 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
 
     return reply.code(201).send({
       leave: toLeaveRequest(result.record, result.employee, null),
-      leaveBalance: getBalance(result.employee),
+      leaveBalance: getBalance(result.currentYearBalance, result.pendingRequests),
     });
   });
 
@@ -241,6 +484,22 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
     if (!params.success) return reply.code(400).send({ error: 'Invalid leave request ID.' });
     if (!parsed.success) return reply.code(400).send({ error: 'Provide a valid review decision and note.' });
 
+    const [requestForBalance] = await db.select().from(leaveRequests)
+      .where(eq(leaveRequests.id, params.data.id))
+      .limit(1);
+    if (requestForBalance) {
+      const currentYear = new Date().getFullYear();
+      const [employeeForBalance] = await db.select({ id: employees.id }).from(employees)
+        .where(eq(employees.id, requestForBalance.employeeId))
+        .limit(1);
+      if (employeeForBalance) {
+        const years = [...new Set([...requestYears(requestForBalance.startDate, requestForBalance.endDate), currentYear])];
+        for (const year of years) {
+          await getOrCreateYearBalance(employeeForBalance.id, year);
+        }
+      }
+    }
+
     const result = await db.transaction(async tx => {
       const [record] = await tx.select().from(leaveRequests)
         .where(eq(leaveRequests.id, params.data.id))
@@ -255,27 +514,37 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
         .limit(1);
       if (!employee) return { error: 'Employee profile for this leave request was not found.' as const };
 
+      const currentYear = new Date().getFullYear();
+      const years = [...new Set([...requestYears(record.startDate, record.endDate), currentYear])];
+      const yearBalances = await tx.select().from(employeeLeaveBalances)
+        .where(and(
+          eq(employeeLeaveBalances.employeeId, employee.id),
+          inArray(employeeLeaveBalances.year, years),
+        ))
+        .for('update');
+      const balanceByYear = new Map(yearBalances.map(balance => [balance.year, balance]));
       const quota = parsed.data.status === 'Approved' ? balanceField(record.leaveType) : null;
       if (quota) {
-        const available = availableBalance(employee, quota);
-        if (record.days > available) {
-          return { error: `Cannot approve: only ${available} ${record.leaveType.toLowerCase()} day(s) remain.` as const };
-        }
-        if (quota === 'annualLeave') {
-          await tx.update(employees).set({
-            annualLeave: sql`${employees.annualLeave} - ${record.days}`,
+        for (const year of requestYears(record.startDate, record.endDate)) {
+          const balance = balanceByYear.get(year);
+          if (!balance) throw new Error(`Leave balance for ${year} was not initialized.`);
+          const requestedDays = businessDaysForYear(record.startDate, record.endDate, year);
+          const available = availableBalance(balance, quota);
+          if (requestedDays > available) {
+            return { error: `Cannot approve: only ${available} ${record.leaveType.toLowerCase()} day(s) remain for ${year}.` as const };
+          }
+          const update = quota === 'annualBalance'
+            ? { annualBalance: sql`${employeeLeaveBalances.annualBalance} - ${requestedDays}` }
+            : quota === 'sickBalance'
+              ? { sickBalance: sql`${employeeLeaveBalances.sickBalance} - ${requestedDays}` }
+              : { casualBalance: sql`${employeeLeaveBalances.casualBalance} - ${requestedDays}` };
+          await tx.update(employeeLeaveBalances).set({
+            ...update,
             updatedAt: new Date(),
-          }).where(eq(employees.id, employee.id));
-        } else if (quota === 'sickLeave') {
-          await tx.update(employees).set({
-            sickLeave: sql`${employees.sickLeave} - ${record.days}`,
-            updatedAt: new Date(),
-          }).where(eq(employees.id, employee.id));
-        } else {
-          await tx.update(employees).set({
-            casualLeave: sql`${employees.casualLeave} - ${record.days}`,
-            updatedAt: new Date(),
-          }).where(eq(employees.id, employee.id));
+          }).where(and(
+            eq(employeeLeaveBalances.employeeId, employee.id),
+            eq(employeeLeaveBalances.year, year),
+          ));
         }
       }
 
@@ -296,15 +565,24 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
       const [updatedEmployee] = await tx.select().from(employees)
         .where(eq(employees.id, employee.id))
         .limit(1);
+      const pendingRequests = await tx.select().from(leaveRequests)
+        .where(and(
+          eq(leaveRequests.employeeId, employee.id),
+          eq(leaveRequests.status, 'Pending'),
+        ));
+      const currentYearBalance = balanceByYear.get(currentYear);
+      if (!currentYearBalance) throw new Error(`Leave balance for ${currentYear} was not initialized.`);
 
       if (employee.userId) {
-        await tx.insert(notifications).values({
-          userId: employee.userId,
-          title: `Your ${record.leaveType.toLowerCase()} request was ${parsed.data.status.toLowerCase()}.`,
-        });
+        await insertUserNotifications(
+          tx,
+          [employee.userId],
+          `Your ${record.leaveType.toLowerCase()} request was ${parsed.data.status.toLowerCase()}.`,
+          'leaveRequests',
+        );
       }
 
-      return { record: reviewed, employee: updatedEmployee, reviewerName: reviewerUser?.name ?? user.name };
+      return { record: reviewed, employee: updatedEmployee, reviewerName: reviewerUser?.name ?? user.name, pendingRequests, currentYearBalance };
     });
 
     if ('error' in result && result.error) {
@@ -314,7 +592,7 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
 
     return {
       leave: toLeaveRequest(result.record, result.employee, result.reviewerName),
-      leaveBalance: getBalance(result.employee),
+      leaveBalance: getBalance(result.currentYearBalance, result.pendingRequests),
     };
   });
 }

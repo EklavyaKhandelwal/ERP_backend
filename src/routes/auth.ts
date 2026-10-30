@@ -30,8 +30,31 @@ const loginSchema = z.object({
   rememberMe: z.boolean().default(false),
 });
 
+const profileAvatarSchema = z.object({
+  avatar: z.string().max(7_000_000).regex(
+    /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/,
+  ),
+});
+
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function isValidAvatar(avatar: string): boolean {
+  const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(avatar);
+  if (!match) return false;
+  const bytes = Buffer.from(match[2], 'base64');
+  if (bytes.length === 0 || bytes.length > 5 * 1024 * 1024) return false;
+
+  if (match[1] === 'png') {
+    return bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  }
+  if (match[1] === 'jpeg') {
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  return bytes.length >= 12
+    && bytes.toString('ascii', 0, 4) === 'RIFF'
+    && bytes.toString('ascii', 8, 12) === 'WEBP';
 }
 
 export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
@@ -177,6 +200,27 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({ user });
+  });
+
+  app.patch('/profile/avatar', { bodyLimit: 7_100_000 }, async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await authenticate(request);
+    if (!user) return reply.code(401).send({ error: 'Authentication required.' });
+
+    const parsed = profileAvatarSchema.safeParse(request.body);
+    if (!parsed.success || !isValidAvatar(parsed.data.avatar)) {
+      return reply.code(400).send({ error: 'Choose a valid PNG, JPEG, or WebP image up to 5 MB.' });
+    }
+
+    const now = new Date();
+    await db.transaction(async tx => {
+      await tx.update(users).set({ avatar: parsed.data.avatar, updatedAt: now })
+        .where(eq(users.id, user.id));
+      await tx.update(employees).set({ avatar: parsed.data.avatar, updatedAt: now })
+        .where(eq(employees.userId, user.id));
+    });
+
+    return reply.send({ user: { ...user, avatar: parsed.data.avatar } });
   });
 
   app.post('/logout', async (request, reply) => {

@@ -3,28 +3,33 @@ import bcrypt from 'bcryptjs';
 import { and, eq, gt } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { db } from './db/index.js';
-import { sessions, users } from './db/schema.js';
+import { employees, sessions, users } from './db/schema.js';
 
 export const SESSION_COOKIE = 'aavil_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SHORT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const authenticationCache = new WeakMap<FastifyRequest, Promise<PublicUser | null>>();
 
 export interface PublicUser {
   id: string;
   name: string;
   email: string;
   role: 'admin' | 'employee';
+  isOwner: boolean;
+  onboardingComplete: boolean;
   avatar: string;
   designation: string;
   department: string;
 }
 
-function toPublicUser(user: typeof users.$inferSelect): PublicUser {
+function toPublicUser(user: typeof users.$inferSelect, onboardingComplete = true): PublicUser {
   return {
     id: user.id,
     name: user.name,
     email: user.email,
     role: user.role,
+    isOwner: user.isOwner,
+    onboardingComplete,
     avatar: user.avatar ?? '/favicon.svg',
     designation: user.designation,
     department: user.department,
@@ -69,13 +74,23 @@ export async function createSession(
 export async function authenticate(
   request: FastifyRequest,
 ): Promise<PublicUser | null> {
+  const cachedResult = authenticationCache.get(request);
+  if (cachedResult) return cachedResult;
+
+  const result = authenticateRequest(request);
+  authenticationCache.set(request, result);
+  return result;
+}
+
+async function authenticateRequest(request: FastifyRequest): Promise<PublicUser | null> {
   const token = request.cookies[SESSION_COOKIE];
   if (!token) return null;
 
   const [result] = await db
-    .select({ session: sessions, user: users })
+    .select({ session: sessions, user: users, onboardingComplete: employees.onboardingComplete })
     .from(sessions)
     .innerJoin(users, eq(sessions.userId, users.id))
+    .leftJoin(employees, eq(employees.userId, users.id))
     .where(and(
       eq(sessions.tokenHash, hashToken(token)),
       gt(sessions.expiresAt, new Date()),
@@ -83,7 +98,9 @@ export async function authenticate(
     ))
     .limit(1);
 
-  return result ? toPublicUser(result.user) : null;
+  return result
+    ? toPublicUser(result.user, result.user.role !== 'employee' || result.onboardingComplete === true)
+    : null;
 }
 
 export async function revokeSession(
@@ -112,5 +129,10 @@ export async function verifyCredentials(
   if (!user || !user.isActive) return null;
   if (!(await bcrypt.compare(password, user.passwordHash))) return null;
 
+  if (user.role === 'employee') {
+    const [employee] = await db.select({ onboardingComplete: employees.onboardingComplete })
+      .from(employees).where(eq(employees.userId, user.id)).limit(1);
+    return toPublicUser(user, employee?.onboardingComplete === true);
+  }
   return toPublicUser(user);
 }

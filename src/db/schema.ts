@@ -1,5 +1,6 @@
 import {
   boolean,
+  customType,
   date,
   integer,
   jsonb,
@@ -22,9 +23,23 @@ export const users = pgTable('users', {
   department: text('department').notNull().default('Unassigned'),
   designation: text('designation').notNull().default('Team member'),
   avatar: text('avatar'),
+  isOwner: boolean('is_owner').notNull().default(false),
+  hasCompletedSetup: boolean('has_completed_setup').notNull().default(true),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('users_one_owner_idx').on(table.isOwner).where(sql`${table.isOwner} = true`),
+]);
+
+export const adminInviteTokens = pgTable('admin_invite_tokens', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  consumedAt: timestamp('consumed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const sessions = pgTable('sessions', {
@@ -43,6 +58,8 @@ export const employees = pgTable('employees', {
   lastName: text('last_name').notNull(),
   email: text('email').notNull().unique(),
   phone: text('phone').notNull().default(''),
+  dateOfBirth: date('date_of_birth', { mode: 'string' }),
+  onboardingComplete: boolean('onboarding_complete').notNull().default(false),
   avatar: text('avatar').notNull().default('/favicon.svg'),
   role: text('role').notNull().default('employee'),
   department: text('department').notNull(),
@@ -62,6 +79,24 @@ export const employees = pgTable('employees', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+const documentBytes = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType: () => 'bytea',
+});
+
+export const employeeDocuments = pgTable('employee_documents', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
+  documentType: text('document_type', {
+    enum: ['offer_letter', 'education_certificate', 'government_id'],
+  }).notNull(),
+  fileName: text('file_name').notNull(),
+  contentType: text('content_type').notNull(),
+  content: documentBytes('content').notNull(),
+  uploadedAt: timestamp('uploaded_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('employee_documents_employee_type_idx').on(table.employeeId, table.documentType),
+]);
 
 export const accountAccessTokens = pgTable('account_access_tokens', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -105,6 +140,39 @@ export const leaveRequests = pgTable('leave_requests', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const employeeLeaveBalances = pgTable('employee_leave_balances', {
+  id: serial('id').primaryKey(),
+  employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
+  year: integer('year').notNull(),
+  annualBalance: integer('annual_balance').notNull(),
+  annualTotal: integer('annual_total').notNull(),
+  sickBalance: integer('sick_balance').notNull(),
+  sickTotal: integer('sick_total').notNull(),
+  casualBalance: integer('casual_balance').notNull(),
+  casualTotal: integer('casual_total').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('employee_leave_balances_employee_year_idx').on(table.employeeId, table.year),
+]);
+
+export const leavePolicies = pgTable('leave_policies', {
+  id: integer('id').primaryKey().default(1),
+  annualDays: integer('annual_days').notNull().default(20),
+  sickDays: integer('sick_days').notNull().default(10),
+  casualDays: integer('casual_days').notNull().default(6),
+  updatedByUserId: uuid('updated_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const leavePolicyHistory = pgTable('leave_policy_history', {
+  id: serial('id').primaryKey(),
+  annualDays: integer('annual_days').notNull(),
+  sickDays: integer('sick_days').notNull(),
+  casualDays: integer('casual_days').notNull(),
+  changedByUserId: uuid('changed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  changedAt: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const projects = pgTable('projects', {
   id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),
@@ -131,6 +199,20 @@ export const projectMembers = pgTable('project_members', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [uniqueIndex('project_members_project_employee_idx').on(table.projectId, table.employeeId)]);
 
+export const projectTasks = pgTable('project_tasks', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  assignedEmployeeId: uuid('assigned_employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
+  createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  title: text('title').notNull(),
+  description: text('description').notNull().default(''),
+  status: text('status', { enum: ['To Do', 'In Progress', 'Blocked', 'Done'] }).notNull().default('To Do'),
+  dueDate: date('due_date', { mode: 'string' }),
+  updateNote: text('update_note').notNull().default(''),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const timesheets = pgTable('timesheets', {
   id: uuid('id').defaultRandom().primaryKey(),
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
@@ -139,6 +221,9 @@ export const timesheets = pgTable('timesheets', {
   submittedOn: date('submitted_on', { mode: 'string' }),
   reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
   reviewNote: text('review_note'),
+  workCompleted: text('work_completed').notNull().default(''),
+  nextWeekFocus: text('next_week_focus').notNull().default(''),
+  blockers: text('blockers').notNull().default(''),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [uniqueIndex('timesheets_employee_week_idx').on(table.employeeId, table.weekStart)]);
@@ -157,6 +242,17 @@ export const timesheetEntries = pgTable('timesheet_entries', {
     sat: number;
     sun: number;
   }>().notNull(),
+  dailyDescriptions: jsonb('daily_descriptions').$type<{
+    mon: string;
+    tue: string;
+    wed: string;
+    thu: string;
+    fri: string;
+    sat: string;
+    sun: string;
+  }>().notNull().default({
+    mon: '', tue: '', wed: '', thu: '', fri: '', sat: '', sun: '',
+  }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -192,7 +288,7 @@ export const appraisalReviews = pgTable('appraisal_reviews', {
   id: uuid('id').defaultRandom().primaryKey(),
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
   cycle: text('cycle').notNull(),
-  status: text('status', { enum: ['Self Assessment', 'Manager Review', 'Completed'] })
+  status: text('status', { enum: ['Self Assessment', 'Admin Review', 'Completed'] })
     .notNull().default('Self Assessment'),
   selfRating: numeric('self_rating', { precision: 2, scale: 1, mode: 'number' }),
   selfComments: text('self_comments'),
@@ -200,16 +296,54 @@ export const appraisalReviews = pgTable('appraisal_reviews', {
   managerRating: numeric('manager_rating', { precision: 2, scale: 1, mode: 'number' }),
   managerComments: text('manager_comments'),
   overallRating: numeric('overall_rating', { precision: 2, scale: 1, mode: 'number' }),
+  selfChallenges: text('self_challenges'),
+  nextGoals: text('next_goals'),
+  deliveryRating: integer('delivery_rating'),
+  qualityRating: integer('quality_rating'),
+  ownershipRating: integer('ownership_rating'),
+  collaborationRating: integer('collaboration_rating'),
+  adminComments: text('admin_comments'),
   completedByUserId: uuid('completed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
   completedDate: date('completed_date', { mode: 'string' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [uniqueIndex('appraisal_reviews_employee_cycle_idx').on(table.employeeId, table.cycle)]);
 
+export const resignations = pgTable('resignations', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
+  resignationDate: date('resignation_date', { mode: 'string' }).notNull(),
+  noticeDays: integer('notice_days').notNull().default(30),
+  proposedLastDay: date('proposed_last_day', { mode: 'string' }).notNull(),
+  reason: text('reason', {
+    enum: ['Career growth', 'Higher studies', 'Personal reasons', 'Relocation', 'Health reasons', 'Other'],
+  }).notNull(),
+  remarks: text('remarks').notNull(),
+  status: text('status', { enum: ['Pending', 'Approved', 'Rejected'] }).notNull().default('Pending'),
+  reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+  reviewNote: text('review_note'),
+  approvedLastDay: date('approved_last_day', { mode: 'string' }),
+  escalationNotifiedAt: timestamp('escalation_notified_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('resignations_one_pending_per_employee_idx')
+    .on(table.employeeId)
+    .where(sql`${table.status} = 'Pending'`),
+]);
+
 export const notifications = pgTable('notifications', {
   id: uuid('id').defaultRandom().primaryKey(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
+  category: text('category'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   readAt: timestamp('read_at', { withTimezone: true }),
+});
+
+export const notificationPreferences = pgTable('notification_preferences', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  preferences: jsonb('preferences').$type<Record<string, boolean>>().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
