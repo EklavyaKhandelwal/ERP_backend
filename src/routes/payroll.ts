@@ -128,7 +128,10 @@ export async function registerPayrollRoutes(app: FastifyInstance): Promise<void>
     const employeeIds = records.map(record => record.employeeId);
     const matched = await db.select({ id: employees.id, status: employees.status })
       .from(employees)
-      .where(eq(employees.status, 'Active'));
+      .where(and(
+        eq(employees.status, 'Active'),
+        inArray(employees.id, employeeIds),
+      ));
     const activeIds = new Set(matched.map(employee => employee.id));
     if (employeeIds.some(id => !activeIds.has(id))) {
       return reply.code(400).send({ error: 'Payroll may only include active employee records.' });

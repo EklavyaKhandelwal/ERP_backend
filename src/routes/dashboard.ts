@@ -117,6 +117,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       sickLeaveTotal: employees.sickLeaveTotal,
       casualLeave: employees.casualLeave,
       casualLeaveTotal: employees.casualLeaveTotal,
+      dateOfBirth: employees.dateOfBirth,
     }).from(employees)
       .where(eq(employees.userId, user.id))
       .limit(1);
@@ -264,6 +265,9 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         records: projectRows.map(({ activeCount: _activeCount, ...project }) => project),
       },
       timesheet: timesheet ?? null,
+      birthday: {
+        isToday: employee.dateOfBirth?.slice(5) === today.slice(5),
+      },
       payslip: payslip ? {
         month: new Date(`${payslip.period}T00:00:00.000Z`).toLocaleString('en', { month: 'long', timeZone: 'UTC' }),
         year: Number(payslip.period.slice(0, 4)),
@@ -281,7 +285,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
     const query = z.object({ today: z.string().date() }).safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Provide today as a valid calendar date.' });
     const { today } = query.data;
-    const [employeeRows, projectRows, pendingLeaveCount, pendingLeaves, upcomingLeaves, pendingTimesheetCount, pendingTimesheets, payrollRows] = await Promise.all([
+    const [employeeRows, projectRows, pendingLeaveCount, pendingLeaves, upcomingLeaves, pendingTimesheetCount, pendingTimesheets, payrollRows, birthdays] = await Promise.all([
       db.select({
         department: employees.department,
         status: employees.status,
@@ -342,6 +346,19 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         .groupBy(payrollRuns.payPeriod)
         .orderBy(desc(payrollRuns.payPeriod))
         .limit(1),
+      db.select({
+        id: employees.id,
+        name: sql<string>`concat(${employees.firstName}, ' ', ${employees.lastName})`,
+        avatar: employees.avatar,
+      })
+        .from(employees)
+        .leftJoin(users, eq(employees.userId, users.id))
+        .where(and(
+          ne(employees.status, 'Inactive'),
+          or(isNull(users.id), ne(users.role, 'admin')),
+          sql`to_char(${employees.dateOfBirth}::date, 'MM-DD') = ${today.slice(5)}`,
+        ))
+        .orderBy(asc(employees.firstName), asc(employees.lastName)),
     ]);
 
     const departmentCounts = new Map<string, number>();
@@ -388,6 +405,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       payroll: latestPayroll
         ? { period: latestPayroll.period.slice(0, 7), netPay: latestPayroll.netPay }
         : { period: null, netPay: null },
+      birthdays,
     };
   });
 }

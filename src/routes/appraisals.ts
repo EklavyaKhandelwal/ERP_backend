@@ -8,6 +8,10 @@ import { insertUserNotifications } from '../notifications.js';
 
 const cycleSchema = z.object({
   cycle: z.string().trim().min(2).max(100),
+  employeeIds: z.array(z.string().uuid()).min(1).max(500),
+}).strict().refine(value => new Set(value.employeeIds).size === value.employeeIds.length, {
+  message: 'Select each employee only once.',
+  path: ['employeeIds'],
 });
 const selfAssessmentSchema = z.object({
   reflection: z.string().trim().min(1).max(5000),
@@ -81,10 +85,14 @@ async function shapeReviews(records: Array<typeof appraisalReviews.$inferSelect>
 }
 
 function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object'
-    && error !== null
-    && 'code' in error
-    && error.code === '23505';
+  const seen = new Set<object>();
+  let current = error;
+  while (typeof current === 'object' && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if ('code' in current && current.code === '23505') return true;
+    current = 'cause' in current ? current.cause : null;
+  }
+  return false;
 }
 
 export async function registerAppraisalRoutes(app: FastifyInstance): Promise<void> {
@@ -114,36 +122,59 @@ export async function registerAppraisalRoutes(app: FastifyInstance): Promise<voi
     if (!user) return reply;
     if (user.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
     const parsed = cycleSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Provide a review cycle name between 2 and 100 characters.' });
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Provide a review cycle name and select one or more employees.' });
+    }
 
-    const activeEmployees = await db.select({ id: employees.id })
+    const activeEmployees = await db.select({ id: employees.id, userId: employees.userId })
       .from(employees)
-      .where(eq(employees.status, 'Active'));
+      .where(and(
+        eq(employees.status, 'Active'),
+        inArray(employees.id, parsed.data.employeeIds),
+      ));
     if (!activeEmployees.length) return reply.code(400).send({ error: 'There are no active employees to include in a cycle.' });
+    if (activeEmployees.length !== parsed.data.employeeIds.length) {
+      return reply.code(400).send({ error: 'One or more selected employees are no longer active. Refresh the list and try again.' });
+    }
 
     try {
-      const records = await db.transaction(async tx => {
+      const result = await db.transaction(async tx => {
+        const existingReviews = await tx.select({ employeeId: appraisalReviews.employeeId })
+          .from(appraisalReviews)
+          .where(and(
+            eq(appraisalReviews.cycle, parsed.data.cycle),
+            inArray(appraisalReviews.employeeId, parsed.data.employeeIds),
+          ));
+        if (existingReviews.length) {
+          return { kind: 'conflict' as const };
+        }
+
         const createdReviews = await tx.insert(appraisalReviews).values(activeEmployees.map(employee => ({
           employeeId: employee.id,
           cycle: parsed.data.cycle,
         }))).returning();
-        const linkedEmployees = await tx.select({ userId: employees.userId })
-          .from(employees)
-          .where(inArray(employees.id, activeEmployees.map(employee => employee.id)));
-        const recipientIds = linkedEmployees.flatMap(employee => employee.userId ? [employee.userId] : []);
+        const recipientIds = activeEmployees.flatMap(employee => employee.userId ? [employee.userId] : []);
         await insertUserNotifications(
           tx,
           recipientIds,
           `The ${parsed.data.cycle} appraisal cycle is ready for your self-review.`,
           'appraisalCycleUpdates',
         );
-        return createdReviews;
+        return { kind: 'created' as const, records: createdReviews };
       });
-      return reply.code(201).send({ appraisals: await shapeReviews(records) });
+      if (result.kind === 'conflict') {
+        return reply.code(409).send({
+          error: 'One or more selected employees already have a review for this cycle. Choose another cycle name or adjust your selection.',
+        });
+      }
+      return reply.code(201).send({ appraisals: await shapeReviews(result.records) });
     } catch (error) {
       if (isUniqueViolation(error)) {
-        return reply.code(409).send({ error: 'A review cycle with this name already exists for one or more employees.' });
+        return reply.code(409).send({
+          error: 'One or more selected employees already have a review for this cycle. Choose another cycle name or adjust your selection.',
+        });
       }
+      request.log.error({ err: error }, 'Failed to create appraisal cycle');
       throw error;
     }
   });

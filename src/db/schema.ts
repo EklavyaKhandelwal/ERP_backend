@@ -3,6 +3,7 @@ import {
   customType,
   date,
   integer,
+  index,
   jsonb,
   numeric,
   pgTable,
@@ -78,7 +79,7 @@ export const employees = pgTable('employees', {
   casualLeaveTotal: integer('casual_leave_total').notNull().default(6),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, table => [index('employees_name_idx').on(table.lastName, table.firstName)]);
 
 const documentBytes = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => 'bytea',
@@ -138,7 +139,10 @@ export const leaveRequests = pgTable('leave_requests', {
   reviewNote: text('review_note'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, table => [
+  index('leave_requests_employee_status_start_idx').on(table.employeeId, table.status, table.startDate),
+  index('leave_requests_status_start_created_idx').on(table.status, table.startDate, table.createdAt),
+]);
 
 export const employeeLeaveBalances = pgTable('employee_leave_balances', {
   id: serial('id').primaryKey(),
@@ -173,6 +177,20 @@ export const leavePolicyHistory = pgTable('leave_policy_history', {
   changedAt: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const companyHolidays = pgTable('company_holidays', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  name: text('name').notNull(),
+  startDate: date('start_date', { mode: 'string' }).notNull(),
+  endDate: date('end_date', { mode: 'string' }).notNull(),
+  description: text('description').notNull().default(''),
+  createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  updatedByUserId: uuid('updated_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('company_holidays_dates_idx').on(table.startDate, table.endDate),
+]);
+
 export const projects = pgTable('projects', {
   id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),
@@ -197,7 +215,10 @@ export const projectMembers = pgTable('project_members', {
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
   role: text('role').notNull().default('Team Member'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [uniqueIndex('project_members_project_employee_idx').on(table.projectId, table.employeeId)]);
+}, table => [
+  uniqueIndex('project_members_project_employee_idx').on(table.projectId, table.employeeId),
+  index('project_members_employee_project_idx').on(table.employeeId, table.projectId),
+]);
 
 export const projectTasks = pgTable('project_tasks', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -211,7 +232,35 @@ export const projectTasks = pgTable('project_tasks', {
   updateNote: text('update_note').notNull().default(''),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, table => [index('project_tasks_project_due_created_idx').on(table.projectId, table.dueDate, table.createdAt)]);
+
+export const attendanceRecords = pgTable('attendance_records', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
+  clockInAt: timestamp('clock_in_at', { withTimezone: true }).notNull(),
+  clockOutAt: timestamp('clock_out_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('attendance_records_one_open_per_employee_idx')
+    .on(table.employeeId)
+    .where(sql`${table.clockOutAt} IS NULL`),
+  uniqueIndex('attendance_records_employee_clock_in_idx').on(table.employeeId, table.clockInAt),
+]);
+
+export const attendanceAdjustments = pgTable('attendance_adjustments', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  attendanceRecordId: uuid('attendance_record_id').notNull().references(() => attendanceRecords.id, { onDelete: 'cascade' }),
+  changedByUserId: uuid('changed_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  reason: text('reason').notNull(),
+  previousClockInAt: timestamp('previous_clock_in_at', { withTimezone: true }).notNull(),
+  previousClockOutAt: timestamp('previous_clock_out_at', { withTimezone: true }),
+  newClockInAt: timestamp('new_clock_in_at', { withTimezone: true }).notNull(),
+  newClockOutAt: timestamp('new_clock_out_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('attendance_adjustments_record_created_idx').on(table.attendanceRecordId, table.createdAt),
+]);
 
 export const timesheets = pgTable('timesheets', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -226,7 +275,10 @@ export const timesheets = pgTable('timesheets', {
   blockers: text('blockers').notNull().default(''),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [uniqueIndex('timesheets_employee_week_idx').on(table.employeeId, table.weekStart)]);
+}, table => [
+  uniqueIndex('timesheets_employee_week_idx').on(table.employeeId, table.weekStart),
+  index('timesheets_status_submitted_idx').on(table.status, table.submittedOn),
+]);
 
 export const timesheetEntries = pgTable('timesheet_entries', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -255,7 +307,7 @@ export const timesheetEntries = pgTable('timesheet_entries', {
   }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, table => [index('timesheet_entries_timesheet_idx').on(table.timesheetId)]);
 
 export const payrollRuns = pgTable('payroll_runs', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -282,7 +334,10 @@ export const payrollRecords = pgTable('payroll_records', {
   paymentDate: date('payment_date', { mode: 'string' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [uniqueIndex('payroll_records_run_employee_idx').on(table.runId, table.employeeId)]);
+}, table => [
+  uniqueIndex('payroll_records_run_employee_idx').on(table.runId, table.employeeId),
+  index('payroll_records_employee_created_idx').on(table.employeeId, table.createdAt),
+]);
 
 export const appraisalReviews = pgTable('appraisal_reviews', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -340,7 +395,7 @@ export const notifications = pgTable('notifications', {
   category: text('category'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   readAt: timestamp('read_at', { withTimezone: true }),
-});
+}, table => [index('notifications_user_created_idx').on(table.userId, table.createdAt)]);
 
 export const notificationPreferences = pgTable('notification_preferences', {
   userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
