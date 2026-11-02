@@ -35,6 +35,13 @@ const profileAvatarSchema = z.object({
     /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/,
   ),
 });
+const profileUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(200),
+  phone: z.string().trim().min(7).max(30).regex(/^[+\d()\-\s.]+$/).refine(
+    value => value.replace(/\D/g, '').length >= 7,
+  ).optional(),
+  dateOfBirth: z.string().date().refine(value => value < new Date().toISOString().slice(0, 10)).optional(),
+}).strict();
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -221,6 +228,53 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     });
 
     return reply.send({ user: { ...user, avatar: parsed.data.avatar } });
+  });
+
+  app.patch('/profile', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await authenticate(request);
+    if (!user) return reply.code(401).send({ error: 'Authentication required.' });
+
+    const parsed = profileUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Provide a valid name, phone number, and date of birth.' });
+    }
+
+    const now = new Date();
+    const updatedUser = await db.transaction(async tx => {
+      const [linkedEmployee] = await tx.select({ id: employees.id })
+        .from(employees)
+        .where(eq(employees.userId, user.id))
+        .limit(1);
+      const nameParts = parsed.data.name.split(/\s+/);
+      const firstName = nameParts.shift();
+      const lastName = nameParts.join(' ');
+      if (linkedEmployee && (!parsed.data.phone || !parsed.data.dateOfBirth || !firstName || !lastName)) {
+        return null;
+      }
+
+      const [updated] = await tx.update(users).set({
+        name: parsed.data.name,
+        updatedAt: now,
+      }).where(eq(users.id, user.id)).returning();
+      if (!updated) throw new Error('Unable to update your account profile.');
+
+      if (linkedEmployee) {
+        await tx.update(employees).set({
+          firstName,
+          lastName,
+          phone: parsed.data.phone,
+          dateOfBirth: parsed.data.dateOfBirth,
+          updatedAt: now,
+        }).where(eq(employees.id, linkedEmployee.id));
+      }
+      return updated;
+    });
+
+    if (!updatedUser) {
+      return reply.code(400).send({ error: 'Employee profiles require a first and last name, phone number, and date of birth.' });
+    }
+    return reply.send({ user: { ...user, name: updatedUser.name } });
   });
 
   app.post('/logout', async (request, reply) => {

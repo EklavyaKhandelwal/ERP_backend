@@ -1,0 +1,2 @@
+DROP INDEX "attendance_adjustments_record_created_idx";--> statement-breakpoint
+CREATE INDEX "attendance_adjustments_record_created_idx" ON "attendance_adjustments" USING btree ("attendance_record_id","created_at");

@@ -14,6 +14,7 @@ import { registerAccountRoutes } from './routes/accounts.js';
 import { registerNotificationRoutes } from './routes/notifications.js';
 import { registerResignationEscalation, registerResignationRoutes } from './routes/resignations.js';
 import { registerDashboardRoutes } from './routes/dashboard.js';
+import { registerAttendanceRoutes } from './routes/attendance.js';
 import { pool } from './db/index.js';
 import { authenticate } from './auth.js';
 
@@ -55,6 +56,7 @@ export function buildApp() {
   app.register(registerNotificationRoutes, { prefix: '/api/notifications' });
   app.register(registerResignationRoutes, { prefix: '/api/resignations' });
   app.register(registerDashboardRoutes, { prefix: '/api/dashboard' });
+  app.register(registerAttendanceRoutes, { prefix: '/api/attendance' });
   registerResignationEscalation(app);
   app.addHook('onClose', async () => {
     await pool.end();

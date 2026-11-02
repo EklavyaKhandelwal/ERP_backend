@@ -24,6 +24,9 @@ const projectInput = z.object({
   message: 'Spent amount cannot exceed the project budget.',
   path: ['spent'],
 });
+const projectMembersInput = z.object({
+  memberIds: z.array(z.string().uuid()).max(500),
+}).strict();
 const taskStatus = z.enum(['To Do', 'In Progress', 'Blocked', 'Done']);
 const createTaskSchema = z.object({
   title: z.string().trim().min(1).max(180),
@@ -237,7 +240,154 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       return project;
     });
 
-    return reply.code(201).send({ projectId: result.id, code: result.code });
+    const [leadEmployee] = result.leadEmployeeId
+      ? await db.select({ id: employees.id, firstName: employees.firstName, lastName: employees.lastName, avatar: employees.avatar })
+        .from(employees).where(eq(employees.id, result.leadEmployeeId)).limit(1)
+      : [];
+    const teamRows = await db.select({ employee: employees, role: projectMembers.role })
+      .from(projectMembers)
+      .innerJoin(employees, eq(projectMembers.employeeId, employees.id))
+      .where(eq(projectMembers.projectId, result.id));
+
+    return reply.code(201).send({
+      project: {
+        id: result.id,
+        name: result.name,
+        code: result.code,
+        client: result.client,
+        status: result.status,
+        progress: 0,
+        budget: result.budget,
+        spent: result.spent,
+        deadline: result.deadline,
+        startDate: result.startDate,
+        leadId: leadEmployee?.id ?? '',
+        leadName: leadEmployee ? `${leadEmployee.firstName} ${leadEmployee.lastName}` : 'Unassigned',
+        leadAvatar: leadEmployee?.avatar ?? '/favicon.svg',
+        team: teamRows.map(({ employee, role }) => ({
+          id: employee.id,
+          name: `${employee.firstName} ${employee.lastName}`,
+          avatar: employee.avatar,
+          role,
+        })),
+        description: result.description,
+        tasksCompleted: 0,
+        totalTasks: 0,
+        tasks: [],
+      },
+    });
+  });
+
+  app.put('/:id/members', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await getUser(request, reply);
+    if (!user) return reply;
+    if (user.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    const parsed = projectMembersInput.safeParse(request.body);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid project ID.' });
+    if (!parsed.success) return reply.code(400).send({ error: 'Provide a valid project team.' });
+
+    const requestedIds = [...new Set(parsed.data.memberIds)];
+    const result = await db.transaction(async tx => {
+      const [project] = await tx.select({
+        id: projects.id,
+        name: projects.name,
+        deadline: projects.deadline,
+        leadEmployeeId: projects.leadEmployeeId,
+      }).from(projects).where(eq(projects.id, params.data.id)).for('update').limit(1);
+      if (!project) return { error: 'Project not found.', status: 404 as const };
+
+      const memberIds = [...new Set([
+        ...requestedIds,
+        ...(project.leadEmployeeId ? [project.leadEmployeeId] : []),
+      ])];
+      const validMembers = memberIds.length
+        ? await tx.select({ id: employees.id }).from(employees).where(inArray(employees.id, memberIds))
+        : [];
+      if (validMembers.length !== memberIds.length) {
+        return { error: 'One or more selected team members do not exist.', status: 400 as const };
+      }
+
+      const currentMembers = await tx.select({
+        employeeId: projectMembers.employeeId,
+      }).from(projectMembers).where(eq(projectMembers.projectId, project.id));
+      const currentIds = currentMembers.map(member => member.employeeId);
+      const nextIdSet = new Set(memberIds);
+      const removedIds = currentIds.filter(id => !nextIdSet.has(id));
+      const addedIds = memberIds.filter(id => !currentIds.includes(id));
+
+      if (removedIds.length) {
+        const unfinishedTasks = await tx.select({
+          employeeId: projectTasks.assignedEmployeeId,
+          title: projectTasks.title,
+        }).from(projectTasks).where(and(
+          eq(projectTasks.projectId, project.id),
+          inArray(projectTasks.assignedEmployeeId, removedIds),
+          inArray(projectTasks.status, ['To Do', 'In Progress', 'Blocked']),
+        ));
+        if (unfinishedTasks.length) {
+          const memberNames = await tx.select({
+            id: employees.id,
+            firstName: employees.firstName,
+            lastName: employees.lastName,
+          }).from(employees).where(inArray(employees.id, removedIds));
+          const namesById = new Map(memberNames.map(member => [
+            member.id,
+            `${member.firstName} ${member.lastName}`,
+          ]));
+          const taskSummary = [...new Set(unfinishedTasks.map(task => (
+            `${task.title} (${namesById.get(task.employeeId) ?? 'team member'})`
+          )))].join(', ');
+          return {
+            error: `Reassign or complete these unfinished tasks before removing team members: ${taskSummary}.`,
+            status: 409 as const,
+          };
+        }
+      }
+
+      if (removedIds.length) {
+        await tx.delete(projectMembers).where(and(
+          eq(projectMembers.projectId, project.id),
+          inArray(projectMembers.employeeId, removedIds),
+        ));
+      }
+      if (addedIds.length) {
+        await tx.insert(projectMembers).values(addedIds.map(employeeId => ({
+          projectId: project.id,
+          employeeId,
+          role: employeeId === project.leadEmployeeId ? 'Lead' : 'Team Member',
+        })));
+      }
+
+      if (addedIds.length) {
+        const addedMembers = await tx.select({ userId: employees.userId })
+          .from(employees).where(inArray(employees.id, addedIds));
+        await insertUserNotifications(
+          tx,
+          addedMembers.flatMap(member => member.userId ? [member.userId] : []),
+          `You have been added to ${project.name}. Project deadline: ${project.deadline}.`,
+          'projectMilestones',
+        );
+      }
+      if (removedIds.length) {
+        const removedMembers = await tx.select({ userId: employees.userId })
+          .from(employees).where(inArray(employees.id, removedIds));
+        await insertUserNotifications(
+          tx,
+          removedMembers.flatMap(member => member.userId ? [member.userId] : []),
+          `You have been removed from ${project.name}.`,
+          'projectMilestones',
+        );
+      }
+
+      return { projectId: project.id };
+    });
+
+    if ('error' in result && typeof result.status === 'number') {
+      return reply.code(result.status).send({ error: result.error });
+    }
+    return { projectId: result.projectId };
   });
 
   app.post('/:id/tasks', async (request, reply) => {
@@ -264,12 +414,21 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       return reply.code(400).send({ error: 'Tasks can only be assigned to employees on this project team.' });
     }
 
-    const task = await db.transaction(async tx => {
+    const result = await db.transaction(async tx => {
       const [lockedProject] = await tx.select({ id: projects.id }).from(projects)
         .where(eq(projects.id, params.data.id))
         .for('update')
         .limit(1);
-      if (!lockedProject) return null;
+      if (!lockedProject) return { error: 'Project not found.', status: 404 as const };
+      const lockedMembership = await tx.select({ employeeId: projectMembers.employeeId })
+        .from(projectMembers)
+        .where(and(
+          eq(projectMembers.projectId, params.data.id),
+          eq(projectMembers.employeeId, parsed.data.assignedEmployeeId),
+        )).limit(1);
+      if (!lockedMembership[0]) {
+        return { error: 'Tasks can only be assigned to employees on this project team.', status: 400 as const };
+      }
       const [created] = await tx.insert(projectTasks).values({
         projectId: params.data.id,
         assignedEmployeeId: parsed.data.assignedEmployeeId,
@@ -279,9 +438,11 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
         dueDate: parsed.data.dueDate,
       }).returning({ id: projectTasks.id });
       await updateProjectTaskProgress(tx, params.data.id);
-      return created;
+      return { task: created };
     });
-    if (!task) return reply.code(404).send({ error: 'Project not found.' });
+    if ('error' in result && typeof result.status === 'number') {
+      return reply.code(result.status).send({ error: result.error });
+    }
 
     const [assignee] = await db.select({ userId: employees.userId }).from(employees)
       .where(eq(employees.id, parsed.data.assignedEmployeeId)).limit(1);
@@ -293,7 +454,7 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
         'projectMilestones',
       );
     }
-    return reply.code(201).send({ taskId: task.id });
+    return reply.code(201).send({ taskId: result.task.id });
   });
 
   app.patch('/:projectId/tasks/:taskId', async (request, reply) => {
@@ -327,7 +488,9 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       if (!employee || employee.id !== task[0].assignedEmployeeId) {
         return reply.code(403).send({ error: 'You can update only tasks assigned to you.' });
       }
-    } else if ('assignedEmployeeId' in parsed.data && parsed.data.assignedEmployeeId) {
+    } else if ('assignedEmployeeId' in parsed.data
+      && parsed.data.assignedEmployeeId
+      && parsed.data.assignedEmployeeId !== task[0].assignedEmployeeId) {
       const membership = await db.select({ employeeId: projectMembers.employeeId })
         .from(projectMembers)
         .where(and(
@@ -357,7 +520,9 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
         if (!employee || employee.id !== lockedTask.assignedEmployeeId) {
           return { error: 'You can update only tasks assigned to you.', status: 403 as const };
         }
-      } else if ('assignedEmployeeId' in parsed.data && parsed.data.assignedEmployeeId) {
+      } else if ('assignedEmployeeId' in parsed.data
+        && parsed.data.assignedEmployeeId
+        && parsed.data.assignedEmployeeId !== lockedTask.assignedEmployeeId) {
         const membership = await tx.select({ employeeId: projectMembers.employeeId })
           .from(projectMembers)
           .where(and(

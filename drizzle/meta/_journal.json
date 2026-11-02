@@ -134,6 +134,34 @@
       "when": 1793363914390,
       "tag": "0018_lame_betty_ross",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1793618838005,
+      "tag": "0019_daffy_chimera",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1793618997208,
+      "tag": "0020_funny_pixie",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793621734328,
+      "tag": "0021_puzzling_senator_kelly",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1793630447749,
+      "tag": "0022_regular_shard",
+      "breakpoints": true
     }
   ]
 }

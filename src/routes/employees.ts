@@ -108,28 +108,7 @@ async function toEmployees(records: EmployeeRecord[], includeAccountStatus = tru
   const usersById = new Map(linkedUsers.map(user => [user.id, user]));
   const pendingIds = new Set(pendingTokens.map(token => token.employeeId));
 
-  let yearBalances = existingBalances;
-  const balanceIds = new Set(yearBalances.map(balance => balance.employeeId));
-  const missingBalances = records.filter(employee => !balanceIds.has(employee.id));
-  if (missingBalances.length > 0) {
-    const [policy] = await db.select().from(leavePolicies).where(eq(leavePolicies.id, 1)).limit(1);
-    await db.insert(employeeLeaveBalances).values(missingBalances.map(employee => ({
-      employeeId: employee.id,
-      year: currentYear,
-      annualBalance: policy?.annualDays ?? 20,
-      annualTotal: policy?.annualDays ?? 20,
-      sickBalance: policy?.sickDays ?? 10,
-      sickTotal: policy?.sickDays ?? 10,
-      casualBalance: policy?.casualDays ?? 6,
-      casualTotal: policy?.casualDays ?? 6,
-    }))).onConflictDoNothing();
-    yearBalances = await db.select().from(employeeLeaveBalances)
-      .where(and(
-        inArray(employeeLeaveBalances.employeeId, employeeIds),
-        eq(employeeLeaveBalances.year, currentYear),
-      ));
-  }
-  const balancesByEmployee = new Map(yearBalances.map(balance => [balance.employeeId, balance]));
+  const balancesByEmployee = new Map(existingBalances.map(balance => [balance.employeeId, balance]));
 
   return records.map(employee => {
     const linkedUser = employee.userId ? usersById.get(employee.userId) : undefined;
