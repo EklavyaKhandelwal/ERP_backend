@@ -162,6 +162,27 @@
       "when": 1793630447749,
       "tag": "0022_regular_shard",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793704914823,
+      "tag": "0023_neat_sabra",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793706700752,
+      "tag": "0024_tricky_black_bolt",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793706963151,
+      "tag": "0025_wide_goliath",
+      "breakpoints": true
     }
   ]
 }
