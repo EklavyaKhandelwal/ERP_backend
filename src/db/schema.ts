@@ -369,12 +369,14 @@ export const resignations = pgTable('resignations', {
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
   resignationDate: date('resignation_date', { mode: 'string' }).notNull(),
   noticeDays: integer('notice_days').notNull().default(30),
+  approvedNoticeDays: integer('approved_notice_days'),
   proposedLastDay: date('proposed_last_day', { mode: 'string' }).notNull(),
   reason: text('reason', {
     enum: ['Career growth', 'Higher studies', 'Personal reasons', 'Relocation', 'Health reasons', 'Other'],
   }).notNull(),
   remarks: text('remarks').notNull(),
   status: text('status', { enum: ['Pending', 'Approved', 'Rejected'] }).notNull().default('Pending'),
+  assignedToUserId: uuid('assigned_to_user_id').references(() => users.id, { onDelete: 'set null' }),
   reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
   reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
   reviewNote: text('review_note'),
@@ -386,6 +388,48 @@ export const resignations = pgTable('resignations', {
   uniqueIndex('resignations_one_pending_per_employee_idx')
     .on(table.employeeId)
     .where(sql`${table.status} = 'Pending'`),
+]);
+
+export const resignationPolicies = pgTable('resignation_policies', {
+  id: integer('id').primaryKey().default(1),
+  noticeDays: integer('notice_days').notNull().default(30),
+  reviewReminderDays: integer('review_reminder_days').notNull().default(7),
+  updatedByUserId: uuid('updated_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const resignationPolicyHistory = pgTable('resignation_policy_history', {
+  id: serial('id').primaryKey(),
+  noticeDays: integer('notice_days').notNull(),
+  reviewReminderDays: integer('review_reminder_days').notNull().default(7),
+  changedByUserId: uuid('changed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  changedAt: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const resignationEvents = pgTable('resignation_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  resignationId: uuid('resignation_id').notNull().references(() => resignations.id, { onDelete: 'cascade' }),
+  eventType: text('event_type').notNull(),
+  description: text('description').notNull(),
+  actorUserId: uuid('actor_user_id').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [index('resignation_events_application_created_idx').on(table.resignationId, table.createdAt)]);
+
+export const resignationChecklistItems = pgTable('resignation_checklist_items', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  resignationId: uuid('resignation_id').notNull().references(() => resignations.id, { onDelete: 'cascade' }),
+  itemKey: text('item_key').notNull(),
+  title: text('title').notNull(),
+  status: text('status', { enum: ['Pending', 'In progress', 'Completed'] }).notNull().default('Pending'),
+  responsibleParty: text('responsible_party').notNull().default(''),
+  dueDate: date('due_date', { mode: 'string' }),
+  note: text('note').notNull().default(''),
+  updatedByUserId: uuid('updated_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('resignation_checklist_application_item_idx').on(table.resignationId, table.itemKey),
+  index('resignation_checklist_application_idx').on(table.resignationId),
 ]);
 
 export const notifications = pgTable('notifications', {
