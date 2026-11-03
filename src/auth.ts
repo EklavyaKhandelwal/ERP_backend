@@ -15,11 +15,14 @@ export interface PublicUser {
   name: string;
   email: string;
   role: 'admin' | 'employee';
+  phone: string;
+  dateOfBirth: string | null;
   isOwner: boolean;
   onboardingComplete: boolean;
   avatar: string;
   designation: string;
   department: string;
+  location: string;
 }
 
 function toPublicUser(user: typeof users.$inferSelect, onboardingComplete = true): PublicUser {
@@ -28,11 +31,14 @@ function toPublicUser(user: typeof users.$inferSelect, onboardingComplete = true
     name: user.name,
     email: user.email,
     role: user.role,
+    phone: user.phone,
+    dateOfBirth: user.dateOfBirth,
     isOwner: user.isOwner,
     onboardingComplete,
     avatar: user.avatar ?? '/favicon.svg',
     designation: user.designation,
     department: user.department,
+    location: user.location,
   };
 }
 

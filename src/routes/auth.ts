@@ -41,6 +41,9 @@ const profileUpdateSchema = z.object({
     value => value.replace(/\D/g, '').length >= 7,
   ).optional(),
   dateOfBirth: z.string().date().refine(value => value < new Date().toISOString().slice(0, 10)).optional(),
+  department: z.string().trim().min(1).max(100).optional(),
+  designation: z.string().trim().min(1).max(150).optional(),
+  location: z.string().trim().min(1).max(150).optional(),
 }).strict();
 
 function hashToken(token: string): string {
@@ -237,7 +240,13 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
     const parsed = profileUpdateSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Provide a valid name, phone number, and date of birth.' });
+      return reply.code(400).send({ error: 'Provide valid profile information.' });
+    }
+    const hasWorkProfileUpdate = parsed.data.department !== undefined
+      || parsed.data.designation !== undefined
+      || parsed.data.location !== undefined;
+    if (hasWorkProfileUpdate && user.role !== 'admin') {
+      return reply.code(403).send({ error: 'Only administrators can update work-profile information.' });
     }
 
     const now = new Date();
@@ -255,6 +264,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
       const [updated] = await tx.update(users).set({
         name: parsed.data.name,
+        ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
+        ...(parsed.data.dateOfBirth !== undefined ? { dateOfBirth: parsed.data.dateOfBirth } : {}),
+        ...(user.role === 'admin' && parsed.data.department !== undefined ? { department: parsed.data.department } : {}),
+        ...(user.role === 'admin' && parsed.data.designation !== undefined ? { designation: parsed.data.designation } : {}),
+        ...(user.role === 'admin' && parsed.data.location !== undefined ? { location: parsed.data.location } : {}),
         updatedAt: now,
       }).where(eq(users.id, user.id)).returning();
       if (!updated) throw new Error('Unable to update your account profile.');
@@ -263,8 +277,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         await tx.update(employees).set({
           firstName,
           lastName,
-          phone: parsed.data.phone,
-          dateOfBirth: parsed.data.dateOfBirth,
+          phone: parsed.data.phone ?? '',
+          dateOfBirth: parsed.data.dateOfBirth ?? null,
+          ...(user.role === 'admin' && parsed.data.department !== undefined ? { department: parsed.data.department } : {}),
+          ...(user.role === 'admin' && parsed.data.designation !== undefined ? { designation: parsed.data.designation } : {}),
+          ...(user.role === 'admin' && parsed.data.location !== undefined ? { location: parsed.data.location } : {}),
           updatedAt: now,
         }).where(eq(employees.id, linkedEmployee.id));
       }
@@ -272,9 +289,19 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     });
 
     if (!updatedUser) {
-      return reply.code(400).send({ error: 'Employee profiles require a first and last name, phone number, and date of birth.' });
+      return reply.code(400).send({ error: 'Profiles require a name, phone number, and date of birth.' });
     }
-    return reply.send({ user: { ...user, name: updatedUser.name } });
+    return reply.send({
+      user: {
+        ...user,
+        name: updatedUser.name,
+        phone: updatedUser.phone,
+        dateOfBirth: updatedUser.dateOfBirth,
+        department: updatedUser.department,
+        designation: updatedUser.designation,
+        location: updatedUser.location,
+      },
+    });
   });
 
   app.post('/logout', async (request, reply) => {
