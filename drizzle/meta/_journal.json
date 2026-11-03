@@ -183,6 +183,13 @@
       "when": 1793706963151,
       "tag": "0025_wide_goliath",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793721449592,
+      "tag": "0026_steady_marten_broadcloak",
+      "breakpoints": true
     }
   ]
 }
