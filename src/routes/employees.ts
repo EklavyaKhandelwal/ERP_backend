@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, isNull } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
@@ -66,14 +66,18 @@ function toEmployee(
   };
 }
 
-function toDirectoryEmployee(employee: EmployeeRecord) {
+function employeeAvatar(employee: EmployeeRecord, accountAvatar?: string | null): string {
+  return accountAvatar && accountAvatar !== '/favicon.svg' ? accountAvatar : employee.avatar;
+}
+
+function toDirectoryEmployee(employee: EmployeeRecord, avatar = employee.avatar) {
   return {
     id: employee.id,
     employeeCode: `EMP-${String(employee.employeeNumber).padStart(4, '0')}`,
     firstName: employee.firstName,
     lastName: employee.lastName,
     email: employee.email,
-    avatar: employee.avatar,
+    avatar,
     role: employee.role,
     department: employee.department,
     designation: employee.designation,
@@ -93,8 +97,23 @@ async function toEmployees(records: EmployeeRecord[], includeAccountStatus = tru
   const currentYear = new Date().getFullYear();
   const [linkedUsers, pendingTokens, existingBalances] = await Promise.all([
     userIds.length
-      ? db.select({ id: users.id, isActive: users.isActive, role: users.role }).from(users).where(inArray(users.id, userIds))
-      : Promise.resolve([]),
+      ? db.select({
+        id: users.id,
+        email: users.email,
+        isActive: users.isActive,
+        role: users.role,
+        avatar: users.avatar,
+      }).from(users).where(or(
+        inArray(users.id, userIds),
+        inArray(users.email, records.map(employee => employee.email.toLowerCase())),
+      ))
+      : db.select({
+        id: users.id,
+        email: users.email,
+        isActive: users.isActive,
+        role: users.role,
+        avatar: users.avatar,
+      }).from(users).where(inArray(users.email, records.map(employee => employee.email.toLowerCase()))),
     unlinkedEmployeeIds.length
       ? db.select({ employeeId: accountAccessTokens.employeeId }).from(accountAccessTokens)
         .where(and(
@@ -110,19 +129,44 @@ async function toEmployees(records: EmployeeRecord[], includeAccountStatus = tru
       )),
   ]);
   const usersById = new Map(linkedUsers.map(user => [user.id, user]));
+  const usersByEmail = new Map(linkedUsers.map(user => [user.email.toLowerCase(), user]));
   const pendingIds = new Set(pendingTokens.map(token => token.employeeId));
 
   const balancesByEmployee = new Map(existingBalances.map(balance => [balance.employeeId, balance]));
 
   return records.map(employee => {
     const linkedUser = employee.userId ? usersById.get(employee.userId) : undefined;
+    const avatarUser = linkedUser ?? usersByEmail.get(employee.email.toLowerCase());
     const accountStatus = linkedUser?.role === 'admin'
       ? 'Admin account'
       : linkedUser
       ? linkedUser.isActive ? 'Active' : 'Deactivated'
       : pendingIds.has(employee.id) ? 'Invitation pending' : 'Not set up';
-    return toEmployee(employee, accountStatus, includeAccountStatus, balancesByEmployee.get(employee.id));
+    return {
+      ...toEmployee(employee, accountStatus, includeAccountStatus, balancesByEmployee.get(employee.id)),
+      avatar: employeeAvatar(employee, avatarUser?.avatar),
+    };
   });
+}
+
+async function getDirectoryAvatars(records: EmployeeRecord[]): Promise<Map<string, string>> {
+  if (!records.length) return new Map();
+  const userIds = records.flatMap(employee => employee.userId ? [employee.userId] : []);
+  const accountUsers = await db.select({
+    id: users.id,
+    email: users.email,
+    avatar: users.avatar,
+  }).from(users).where(or(
+    inArray(users.id, userIds),
+    inArray(users.email, records.map(employee => employee.email.toLowerCase())),
+  ));
+  const usersById = new Map(accountUsers.map(user => [user.id, user]));
+  const usersByEmail = new Map(accountUsers.map(user => [user.email.toLowerCase(), user]));
+  return new Map(records.map(employee => {
+    const accountUser = (employee.userId ? usersById.get(employee.userId) : undefined)
+      ?? usersByEmail.get(employee.email.toLowerCase());
+    return [employee.id, employeeAvatar(employee, accountUser?.avatar)];
+  }));
 }
 async function getUser(request: FastifyRequest, reply: FastifyReply): Promise<PublicUser | null> {
   const user = await authenticate(request);
@@ -157,9 +201,12 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     const ownRecords = records.filter(record => record.userId === user.id);
     const ownEmployees = await toEmployees(ownRecords, false);
     const ownEmployee = ownEmployees[0];
+    const avatars = await getDirectoryAvatars(records);
     return {
       employees: records.map(record => (
-        record.userId === user.id && ownEmployee ? ownEmployee : toDirectoryEmployee(record)
+        record.userId === user.id && ownEmployee
+          ? ownEmployee
+          : toDirectoryEmployee(record, avatars.get(record.id))
       )),
     };
   });
@@ -212,7 +259,8 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     if (record.userId === user.id) {
       return { employee: (await toEmployees([record], false))[0] };
     }
-    return { employee: toDirectoryEmployee(record) };
+    const avatars = await getDirectoryAvatars([record]);
+    return { employee: toDirectoryEmployee(record, avatars.get(record.id)) };
   });
 
   app.post('/', async (request, reply) => {
@@ -226,7 +274,7 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
 
     const data = parsed.data;
     const [leavePolicy] = await db.select().from(leavePolicies).where(eq(leavePolicies.id, 1)).limit(1);
-    const [matchingUser] = await db.select({ id: users.id, role: users.role })
+    const [matchingUser] = await db.select({ id: users.id, role: users.role, avatar: users.avatar })
       .from(users)
       .where(eq(users.email, data.email.toLowerCase()))
       .limit(1);
@@ -253,6 +301,7 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
           ...data,
           email: data.email.toLowerCase(),
           userId: matchingUser?.id ?? null,
+          avatar: data.avatar === '/favicon.svg' ? matchingUser?.avatar ?? data.avatar : data.avatar,
           annualLeave: annualDays,
           annualLeaveTotal: annualDays,
           sickLeave: sickDays,
