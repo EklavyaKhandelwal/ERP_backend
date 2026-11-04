@@ -241,7 +241,9 @@ export async function registerPayrollRoutes(app: FastifyInstance): Promise<void>
       return reply.code(201).send({ payroll: await shapeRecords(created) });
     } catch (error) {
       if (isUniqueViolation(error)) {
-        return reply.code(409).send({ error: 'A payroll run already exists for this pay period.' });
+        return reply.code(409).send({
+          error: 'Payroll for this month has already been created. Choose another month or review the existing payroll run.',
+        });
       }
       throw error;
     }
@@ -386,8 +388,12 @@ export async function registerPayrollRoutes(app: FastifyInstance): Promise<void>
 }
 
 function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object'
-    && error !== null
-    && 'code' in error
-    && error.code === '23505';
+  const seen = new Set<object>();
+  let current = error;
+  while (typeof current === 'object' && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if ('code' in current && current.code === '23505') return true;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return false;
 }
