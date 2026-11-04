@@ -227,7 +227,10 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       })
         .from(payrollRecords)
         .innerJoin(payrollRuns, eq(payrollRecords.runId, payrollRuns.id))
-        .where(eq(payrollRecords.employeeId, employee.id))
+        .where(and(
+          eq(payrollRecords.employeeId, employee.id),
+          eq(payrollRecords.payslipStatus, 'Published'),
+        ))
         .orderBy(desc(payrollRuns.payPeriod))
         .limit(1),
     ]);
@@ -343,6 +346,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       })
         .from(payrollRuns)
         .innerJoin(payrollRecords, eq(payrollRecords.runId, payrollRuns.id))
+        .where(eq(payrollRecords.payslipStatus, 'Published'))
         .groupBy(payrollRuns.payPeriod)
         .orderBy(desc(payrollRuns.payPeriod))
         .limit(1),

@@ -71,6 +71,8 @@ export const employees = pgTable('employees', {
   joinDate: text('join_date').notNull(),
   status: text('status', { enum: ['Active', 'On Leave', 'Probation', 'Inactive'] }).notNull().default('Active'),
   salary: numeric('salary', { precision: 12, scale: 2, mode: 'number' }).notNull().default(0),
+  bankName: text('bank_name').notNull().default(''),
+  bankAccountNumber: text('bank_account_number').notNull().default(''),
   location: text('location').notNull().default('Remote'),
   manager: text('manager').notNull().default(''),
   skills: text('skills').array().notNull().default([]),
@@ -323,6 +325,10 @@ export const payrollRecords = pgTable('payroll_records', {
   id: uuid('id').defaultRandom().primaryKey(),
   runId: uuid('run_id').notNull().references(() => payrollRuns.id, { onDelete: 'cascade' }),
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'restrict' }),
+  basicSalaryMaster: numeric('basic_salary_master', { precision: 14, scale: 2, mode: 'number' }).notNull().default(0),
+  hraMaster: numeric('hra_master', { precision: 14, scale: 2, mode: 'number' }).notNull().default(0),
+  specialAllowanceMaster: numeric('special_allowance_master', { precision: 14, scale: 2, mode: 'number' }).notNull().default(0),
+  bonusMaster: numeric('bonus_master', { precision: 14, scale: 2, mode: 'number' }).notNull().default(0),
   basicSalary: numeric('basic_salary', { precision: 14, scale: 2, mode: 'number' }).notNull(),
   hra: numeric('hra', { precision: 14, scale: 2, mode: 'number' }).notNull().default(0),
   specialAllowance: numeric('special_allowance', { precision: 14, scale: 2, mode: 'number' }).notNull().default(0),
@@ -333,6 +339,17 @@ export const payrollRecords = pgTable('payroll_records', {
   totalEarnings: numeric('total_earnings', { precision: 14, scale: 2, mode: 'number' }).notNull(),
   totalDeductions: numeric('total_deductions', { precision: 14, scale: 2, mode: 'number' }).notNull(),
   netPay: numeric('net_pay', { precision: 14, scale: 2, mode: 'number' }).notNull(),
+  effectiveWorkDays: integer('effective_work_days').notNull().default(0),
+  lossOfPayDays: integer('loss_of_pay_days').notNull().default(0),
+  bankName: text('bank_name').notNull().default(''),
+  bankAccountNumber: text('bank_account_number').notNull().default(''),
+  panNumber: text('pan_number').notNull().default(''),
+  providentFundNumber: text('provident_fund_number').notNull().default(''),
+  providentFundUan: text('provident_fund_uan').notNull().default(''),
+  otherDetails: text('other_details').notNull().default(''),
+  payslipStatus: text('payslip_status', { enum: ['Draft', 'Published'] }).notNull().default('Draft'),
+  revision: integer('revision').notNull().default(1),
+  publishedAt: timestamp('published_at', { withTimezone: true }),
   status: text('status', { enum: ['Paid', 'Processing', 'Pending'] }).notNull().default('Pending'),
   paymentDate: date('payment_date', { mode: 'string' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -340,6 +357,19 @@ export const payrollRecords = pgTable('payroll_records', {
 }, table => [
   uniqueIndex('payroll_records_run_employee_idx').on(table.runId, table.employeeId),
   index('payroll_records_employee_created_idx').on(table.employeeId, table.createdAt),
+]);
+
+export const payrollRecordRevisions = pgTable('payroll_record_revisions', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  payrollRecordId: uuid('payroll_record_id').notNull().references(() => payrollRecords.id, { onDelete: 'cascade' }),
+  revision: integer('revision').notNull(),
+  changedByUserId: uuid('changed_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  note: text('note').notNull(),
+  snapshot: jsonb('snapshot').$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('payroll_record_revisions_record_revision_idx').on(table.payrollRecordId, table.revision),
+  index('payroll_record_revisions_record_created_idx').on(table.payrollRecordId, table.createdAt),
 ]);
 
 export const appraisalReviews = pgTable('appraisal_reviews', {
