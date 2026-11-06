@@ -31,7 +31,6 @@ export function buildApp() {
     if (
       path.startsWith('/api/auth/')
       || path === '/api/accounts/complete-setup'
-      || path === '/api/accounts/complete-admin-setup'
       || path === '/api/accounts/onboarding'
     ) return;
     const user = await authenticate(request);
