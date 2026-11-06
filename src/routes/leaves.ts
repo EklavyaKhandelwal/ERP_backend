@@ -432,6 +432,9 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
     reply.header('cache-control', 'no-store');
     const user = await requireUser(request, reply);
     if (!user) return reply;
+    if (user.role !== 'employee') {
+      return reply.code(403).send({ error: 'HR accounts cannot submit leave requests.' });
+    }
 
     const parsed = applicationSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -606,6 +609,7 @@ export async function registerLeaveRoutes(app: FastifyInstance): Promise<void> {
         .for('update')
         .limit(1);
       if (!employee) return { error: 'Employee profile for this leave request was not found.' as const };
+      if (employee.userId === user.id) return { error: 'You cannot review your own leave request.' as const };
 
       const currentYear = new Date().getFullYear();
       const years = [...new Set([...requestYears(record.startDate, record.endDate), currentYear])];

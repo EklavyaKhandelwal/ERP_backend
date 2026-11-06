@@ -5,8 +5,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
 import { db } from '../db/index.js';
-import { accountAccessTokens, adminInviteTokens, employeeDocuments, employees, passwordResetTokens, sessions, users } from '../db/schema.js';
-import { isAdminInviteEmailConfigured, sendAdminInviteEmail } from '../email.js';
+import { accountAccessTokens, employeeDocuments, employees, passwordResetTokens, sessions, users } from '../db/schema.js';
+import { isEmployeeAccessEmailConfigured, sendEmployeeAccessEmail } from '../email.js';
 import { env } from '../env.js';
 import { insertUserNotifications } from '../notifications.js';
 
@@ -38,17 +38,6 @@ const completeSetupSchema = z.object({
   token: z.string().min(32).max(128),
   password: passwordSchema,
 }).and(onboardingSchema);
-const completeAdminSetupSchema = z.object({
-  token: z.string().min(32).max(128),
-  password: passwordSchema,
-});
-const inviteAdminSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  email: z.string().trim().email().max(254),
-  department: z.string().trim().min(1).max(100).default('Human Resources'),
-  designation: z.string().trim().min(1).max(100).default('HR Admin'),
-});
-
 async function getUser(request: FastifyRequest, reply: FastifyReply): Promise<PublicUser | null> {
   const user = await authenticate(request);
   if (!user) {
@@ -135,215 +124,12 @@ async function saveOnboarding(
   });
 }
 
-async function deliverAdminInvite(request: FastifyRequest, email: string, invitePath: string): Promise<boolean> {
-  const baseUrl = env.APP_BASE_URL?.replace(/\/+$/, '');
-  if (!isAdminInviteEmailConfigured() || !baseUrl) return false;
-  try {
-    await sendAdminInviteEmail(email, `${baseUrl}${invitePath}`);
-    return true;
-  } catch (error) {
-    request.log.error({ err: error }, 'HR admin invitation email delivery failed');
-    return false;
-  }
-}
-
 export async function registerAccountRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/admins', async (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const owner = await getUser(request, reply);
-    if (!owner) return reply;
-    if (!owner.isOwner) return reply.code(403).send({ error: 'Owner access required.' });
-
-    const records = await db.select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-      department: users.department,
-      designation: users.designation,
-      isOwner: users.isOwner,
-      isActive: users.isActive,
-      hasCompletedSetup: users.hasCompletedSetup,
-      createdAt: users.createdAt,
-    }).from(users).where(eq(users.role, 'admin'));
-    return { admins: records };
-  });
-
-  app.post('/admins/invitations', {
-    config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
-  }, async (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const owner = await getUser(request, reply);
-    if (!owner) return reply;
-    if (!owner.isOwner) return reply.code(403).send({ error: 'Owner access required.' });
-    const parsed = inviteAdminSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Provide a valid name, email, department, and designation.' });
-
-    const email = parsed.data.email.toLowerCase();
-    const [existing] = await db.select({
-      id: users.id,
-      role: users.role,
-      isActive: users.isActive,
-      hasCompletedSetup: users.hasCompletedSetup,
-    }).from(users).where(eq(users.email, email)).limit(1);
-    if (existing) return reply.code(409).send({ error: 'An account already uses this email address.' });
-
-    const now = new Date();
-    const token = randomBytes(32).toString('base64url');
-    const tokenHash = hashToken(token);
-    const passwordHash = await bcrypt.hash(randomBytes(32).toString('hex'), 12);
-    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    let created: { id: string };
-    try {
-      [created] = await db.transaction(async tx => {
-        const [user] = await tx.insert(users).values({
-          email,
-          passwordHash,
-          name: parsed.data.name,
-          role: 'admin',
-          department: parsed.data.department,
-          designation: parsed.data.designation,
-          hasCompletedSetup: false,
-          isActive: false,
-        }).returning({ id: users.id });
-        await tx.insert(adminInviteTokens).values({
-          userId: user.id,
-          createdByUserId: owner.id,
-          tokenHash,
-          expiresAt,
-        });
-        return [user];
-      });
-    } catch (error) {
-      if (isUniqueViolation(error)) return reply.code(409).send({ error: 'An account already uses this email address.' });
-      throw error;
-    }
-
-    request.log.info({ invitedUserId: created.id, createdByUserId: owner.id }, 'HR admin invited');
-    const invitePath = `/account/admin-setup?token=${encodeURIComponent(token)}`;
-    return reply.code(201).send({
-      invitePath,
-      expiresAt: expiresAt.toISOString(),
-      emailSent: await deliverAdminInvite(request, email, invitePath),
-    });
-  });
-
-  app.post('/admins/:adminId/invitation', {
-    config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
-  }, async (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const owner = await getUser(request, reply);
-    if (!owner) return reply;
-    if (!owner.isOwner) return reply.code(403).send({ error: 'Owner access required.' });
-    const params = z.object({ adminId: z.string().uuid() }).safeParse(request.params);
-    if (!params.success) return reply.code(400).send({ error: 'Invalid admin ID.' });
-
-    const [target] = await db.select({
-      id: users.id,
-      email: users.email,
-      isOwner: users.isOwner,
-      isActive: users.isActive,
-      hasCompletedSetup: users.hasCompletedSetup,
-    }).from(users).where(and(eq(users.id, params.data.adminId), eq(users.role, 'admin'))).limit(1);
-    if (!target) return reply.code(404).send({ error: 'HR admin account not found.' });
-    if (target.isOwner || target.hasCompletedSetup || target.isActive) {
-      return reply.code(409).send({ error: 'A new invitation can only be issued to an account still awaiting setup.' });
-    }
-
-    const now = new Date();
-    const token = randomBytes(32).toString('base64url');
-    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    await db.transaction(async tx => {
-      await tx.update(adminInviteTokens).set({ consumedAt: now })
-        .where(and(
-          eq(adminInviteTokens.userId, target.id),
-          isNull(adminInviteTokens.consumedAt),
-        ));
-      await tx.insert(adminInviteTokens).values({
-        userId: target.id,
-        createdByUserId: owner.id,
-        tokenHash: hashToken(token),
-        expiresAt,
-      });
-    });
-    const invitePath = `/account/admin-setup?token=${encodeURIComponent(token)}`;
-    request.log.info({ invitedUserId: target.id, createdByUserId: owner.id }, 'HR admin invitation reissued');
-    return reply.code(201).send({
-      invitePath,
-      expiresAt: expiresAt.toISOString(),
-      emailSent: await deliverAdminInvite(request, target.email, invitePath),
-    });
-  });
-
-  app.patch('/admins/:adminId/active', async (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const owner = await getUser(request, reply);
-    if (!owner) return reply;
-    if (!owner.isOwner) return reply.code(403).send({ error: 'Owner access required.' });
-    const params = z.object({ adminId: z.string().uuid() }).safeParse(request.params);
-    const body = z.object({ isActive: z.boolean() }).safeParse(request.body);
-    if (!params.success) return reply.code(400).send({ error: 'Invalid admin ID.' });
-    if (!body.success) return reply.code(400).send({ error: 'Provide a valid account access status.' });
-    if (params.data.adminId === owner.id) return reply.code(409).send({ error: 'The owner account cannot be deactivated here.' });
-
-    const [target] = await db.select({
-      id: users.id,
-      isOwner: users.isOwner,
-      isActive: users.isActive,
-      hasCompletedSetup: users.hasCompletedSetup,
-    }).from(users).where(and(eq(users.id, params.data.adminId), eq(users.role, 'admin'))).limit(1);
-    if (!target) return reply.code(404).send({ error: 'HR admin account not found.' });
-    if (target.isOwner) return reply.code(409).send({ error: 'The owner account cannot be deactivated here.' });
-    if (body.data.isActive && !target.hasCompletedSetup) {
-      return reply.code(409).send({ error: 'This HR admin has not completed account setup yet.' });
-    }
-
-    await db.transaction(async tx => {
-      await tx.update(users).set({ isActive: body.data.isActive, updatedAt: new Date() })
-        .where(eq(users.id, target.id));
-      if (!body.data.isActive) await tx.delete(sessions).where(eq(sessions.userId, target.id));
-    });
-    return { account: { isActive: body.data.isActive } };
-  });
-
-  app.post('/complete-admin-setup', {
-    config: { rateLimit: { max: 8, timeWindow: '1 minute' } },
-  }, async (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const parsed = completeAdminSetupSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Provide a valid invitation and a password of at least 12 characters.' });
-
-    const now = new Date();
-    const tokenHash = hashToken(parsed.data.token);
-    const passwordHash = await bcrypt.hash(parsed.data.password, 12);
-    const completed = await db.transaction(async tx => {
-      const [invite] = await tx.update(adminInviteTokens).set({ consumedAt: now })
-        .where(and(
-          eq(adminInviteTokens.tokenHash, tokenHash),
-          isNull(adminInviteTokens.consumedAt),
-          gt(adminInviteTokens.expiresAt, now),
-        )).returning({ userId: adminInviteTokens.userId });
-      if (!invite) return false;
-      const [user] = await tx.update(users).set({
-        passwordHash,
-        hasCompletedSetup: true,
-        isActive: true,
-        updatedAt: now,
-      }).where(and(
-        eq(users.id, invite.userId),
-        eq(users.role, 'admin'),
-        eq(users.hasCompletedSetup, false),
-      )).returning({ id: users.id });
-      return Boolean(user);
-    });
-    if (!completed) return reply.code(400).send({ error: 'This invitation is invalid, expired, or already used. Ask the owner for a new invitation.' });
-    return { message: 'Password saved. Sign in with your work email and new password.' };
-  });
-
   app.post('/employees/:employeeId/access-link', async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const admin = await getUser(request, reply);
     if (!admin) return reply;
-    if (admin.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
+    if (admin.role !== 'admin') return reply.code(403).send({ error: 'HR access required.' });
 
     const params = z.object({ employeeId: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Invalid employee ID.' });
@@ -388,10 +174,24 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
       throw error;
     }
 
+    const accessPath = `/account/setup?token=${encodeURIComponent(token)}`;
+    const baseUrl = env.APP_BASE_URL?.replace(/\/+$/, '');
+    let emailSent = false;
+    if (isEmployeeAccessEmailConfigured() && baseUrl) {
+      try {
+        await sendEmployeeAccessEmail(employee.email, `${baseUrl}${accessPath}`, purpose);
+        emailSent = true;
+      } catch (error) {
+        request.log.error({ err: error, employeeId: employee.id }, 'Employee access email delivery failed');
+      }
+    }
+
     return reply.code(201).send({
       purpose,
-      accessPath: `/account/setup?token=${encodeURIComponent(token)}`,
+      accessPath,
       expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+      email: employee.email,
+      emailSent,
     });
   });
 
@@ -399,7 +199,7 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
     reply.header('cache-control', 'no-store');
     const admin = await getUser(request, reply);
     if (!admin) return reply;
-    if (admin.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
+    if (admin.role !== 'admin') return reply.code(403).send({ error: 'HR access required.' });
     const params = z.object({ employeeId: z.string().uuid() }).safeParse(request.params);
     const body = z.object({ isActive: z.boolean() }).safeParse(request.body);
     if (!params.success) return reply.code(400).send({ error: 'Invalid employee ID.' });
@@ -557,7 +357,7 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
     reply.header('cache-control', 'no-store');
     const admin = await getUser(request, reply);
     if (!admin) return reply;
-    if (admin.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
+    if (admin.role !== 'admin') return reply.code(403).send({ error: 'HR access required.' });
     const params = z.object({ employeeId: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Invalid employee ID.' });
     const documents = await db.select({
@@ -574,7 +374,7 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
     reply.header('cache-control', 'no-store');
     const admin = await getUser(request, reply);
     if (!admin) return reply;
-    if (admin.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
+    if (admin.role !== 'admin') return reply.code(403).send({ error: 'HR access required.' });
     const params = z.object({ employeeId: z.string().uuid(), documentId: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Invalid document ID.' });
     const [document] = await db.select().from(employeeDocuments).where(and(

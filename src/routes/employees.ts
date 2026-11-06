@@ -192,7 +192,16 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     const user = await getUser(request, reply);
     if (!user) return reply;
 
-    const records = await db.select().from(employees).orderBy(asc(employees.lastName), asc(employees.firstName));
+    const allRecords = await db.select().from(employees).orderBy(asc(employees.lastName), asc(employees.firstName));
+    const adminAccounts = await db.select({ id: users.id, email: users.email })
+      .from(users)
+      .where(eq(users.role, 'admin'));
+    const adminUserIds = new Set(adminAccounts.map(account => account.id));
+    const adminEmails = new Set(adminAccounts.map(account => account.email.toLowerCase()));
+    const records = allRecords.filter(record => (
+      !(record.userId && adminUserIds.has(record.userId))
+      && !adminEmails.has(record.email.toLowerCase())
+    ));
 
     if (user.role === 'admin') {
       return { employees: await toEmployees(records) };

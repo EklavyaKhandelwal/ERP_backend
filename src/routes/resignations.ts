@@ -1,5 +1,4 @@
 import { and, asc, desc, eq, inArray, isNull, lte } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/pg-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth.js';
@@ -52,11 +51,6 @@ const checklistUpdateSchema = z.object({
 }).strict().refine(value => Object.keys(value).length > 0, {
   message: 'Provide at least one checklist field to update.',
 });
-const assignmentSchema = z.object({
-  assignedToUserId: z.string().uuid().nullable(),
-}).strict();
-const resignationAssignee = alias(users, 'resignation_assignee');
-
 type ResignationPolicy = { noticeDays: number; reviewReminderDays: number };
 
 function toResignationPolicy(record: typeof resignationPolicies.$inferSelect): ResignationPolicy {
@@ -92,7 +86,6 @@ function toApplication(row: {
   employee: typeof employees.$inferSelect;
   reviewerName: string | null;
   reviewerEmail: string | null;
-  assignedToName: string | null;
 }) {
   return {
     id: row.resignation.id,
@@ -110,8 +103,6 @@ function toApplication(row: {
     reason: row.resignation.reason,
     remarks: row.resignation.remarks,
     status: row.resignation.status,
-    assignedToUserId: row.resignation.assignedToUserId,
-    assignedTo: row.assignedToName,
     reviewedBy: row.reviewerName,
     reviewerEmail: row.reviewerEmail,
     reviewedAt: row.resignation.reviewedAt,
@@ -136,13 +127,12 @@ async function escalateOverdueApplications(logError: (error: unknown) => void): 
     const cutoff = new Date(now.getTime() - reminderDays * 24 * 60 * 60 * 1000);
     const admins = await tx.select({ id: users.id })
       .from(users)
-      .where(and(eq(users.role, 'admin'), eq(users.isActive, true)));
+      .where(and(eq(users.role, 'admin'), eq(users.isOwner, true), eq(users.isActive, true)));
     if (!admins.length) return;
 
     const overdue = await tx.select({
       id: resignations.id,
       employeeId: resignations.employeeId,
-      assignedToUserId: resignations.assignedToUserId,
       firstName: employees.firstName,
       lastName: employees.lastName,
     }).from(resignations)
@@ -167,11 +157,7 @@ async function escalateOverdueApplications(logError: (error: unknown) => void): 
       if (!claimed) continue;
 
       const employeeName = `${application.firstName} ${application.lastName}`;
-      const recipients = application.assignedToUserId
-        ? admins.filter(admin => admin.id === application.assignedToUserId)
-        : admins;
-      const escalationRecipients = recipients.length ? recipients : admins;
-      await tx.insert(notifications).values(escalationRecipients.map(admin => ({
+      await tx.insert(notifications).values(admins.map(admin => ({
         userId: admin.id,
         title: `Overdue resignation review: ${employeeName}'s request has been waiting ${reminderDays} days.`,
       })));
@@ -214,21 +200,6 @@ export async function registerResignationRoutes(app: FastifyInstance): Promise<v
         changedAt: change.changedAt.toISOString(),
       })),
     };
-  });
-
-  app.get('/reviewers', async (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const user = await requireUser(request, reply);
-    if (!user) return reply;
-    if (user.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
-    const reviewers = await db.select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-    }).from(users)
-      .where(and(eq(users.role, 'admin'), eq(users.isActive, true)))
-      .orderBy(asc(users.name));
-    return { reviewers };
   });
 
   app.put('/policy', async (request, reply) => {
@@ -291,11 +262,9 @@ export async function registerResignationRoutes(app: FastifyInstance): Promise<v
       employee: employees,
       reviewerName: users.name,
       reviewerEmail: users.email,
-      assignedToName: resignationAssignee.name,
     }).from(resignations)
       .innerJoin(employees, eq(resignations.employeeId, employees.id))
-      .leftJoin(users, eq(resignations.reviewedByUserId, users.id))
-      .leftJoin(resignationAssignee, eq(resignations.assignedToUserId, resignationAssignee.id));
+      .leftJoin(users, eq(resignations.reviewedByUserId, users.id));
     const rows = user.role === 'admin'
       ? await query.orderBy(asc(resignations.status), asc(resignations.createdAt))
       : await query.where(eq(employees.userId, user.id))
@@ -359,14 +328,12 @@ export async function registerResignationRoutes(app: FastifyInstance): Promise<v
       checklistByApplication.set(item.resignationId, current);
     }
     const serialized = rows.map(row => ({
-        ...toApplication(row),
-        events: eventsByApplication.get(row.resignation.id) ?? [],
-        checklist: checklistByApplication.get(row.resignation.id) ?? [],
-      }));
+      ...toApplication(row),
+      events: eventsByApplication.get(row.resignation.id) ?? [],
+      checklist: checklistByApplication.get(row.resignation.id) ?? [],
+    }));
     return {
-      resignations: user.role === 'admin'
-        ? serialized
-        : serialized.map(application => ({ ...application, assignedToUserId: null })),
+      resignations: serialized,
     };
   });
 
@@ -441,7 +408,6 @@ export async function registerResignationRoutes(app: FastifyInstance): Promise<v
         employee: result.employee,
         reviewerName: null,
         reviewerEmail: null,
-        assignedToName: null,
       });
       return reply.code(201).send({
         resignation: {
@@ -565,86 +531,8 @@ export async function registerResignationRoutes(app: FastifyInstance): Promise<v
         employee: outcome.employee,
         reviewerName: user.name,
         reviewerEmail: user.email,
-        assignedToName: null,
       }),
     };
-  });
-
-  app.patch('/:id/assignment', async (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const user = await requireUser(request, reply);
-    if (!user) return reply;
-    if (user.role !== 'admin') return reply.code(403).send({ error: 'Administrator access required.' });
-
-    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
-    const parsed = assignmentSchema.safeParse(request.body);
-    if (!params.success) return reply.code(400).send({ error: 'Invalid resignation application ID.' });
-    if (!parsed.success) return reply.code(400).send({ error: 'Select an active administrator or leave the request unassigned.' });
-
-    const result = await db.transaction(async tx => {
-      const [existing] = await tx.select({
-        resignation: resignations,
-        employee: employees,
-      }).from(resignations)
-        .innerJoin(employees, eq(resignations.employeeId, employees.id))
-        .where(eq(resignations.id, params.data.id))
-        .limit(1);
-      if (!existing) return { kind: 'missing' as const };
-      if (existing.resignation.status !== 'Pending') return { kind: 'not-pending' as const };
-      if (existing.resignation.assignedToUserId === parsed.data.assignedToUserId) {
-        return { kind: 'unchanged' as const };
-      }
-
-      const assignee = parsed.data.assignedToUserId
-        ? (await tx.select({ id: users.id, name: users.name })
-          .from(users)
-          .where(and(
-            eq(users.id, parsed.data.assignedToUserId),
-            eq(users.role, 'admin'),
-            eq(users.isActive, true),
-          ))
-          .limit(1))[0]
-        : null;
-      if (parsed.data.assignedToUserId && !assignee) return { kind: 'invalid-assignee' as const };
-
-      const previousAssignee = existing.resignation.assignedToUserId
-        ? (await tx.select({ name: users.name })
-          .from(users)
-          .where(eq(users.id, existing.resignation.assignedToUserId))
-          .limit(1))[0]?.name ?? 'Former administrator'
-        : 'Unassigned';
-      const nextAssignee = assignee?.name ?? 'Unassigned';
-      const [updated] = await tx.update(resignations)
-        .set({
-          assignedToUserId: parsed.data.assignedToUserId,
-          updatedAt: new Date(),
-        })
-        .where(and(
-          eq(resignations.id, params.data.id),
-          eq(resignations.status, 'Pending'),
-        ))
-        .returning({ id: resignations.id });
-      if (!updated) return { kind: 'not-pending' as const };
-
-      await tx.insert(resignationEvents).values({
-        resignationId: updated.id,
-        eventType: 'Review assigned',
-        description: `Review responsibility changed from ${previousAssignee} to ${nextAssignee}.`,
-        actorUserId: user.id,
-      });
-      if (assignee && assignee.id !== user.id) {
-        await tx.insert(notifications).values({
-          userId: assignee.id,
-          title: `You are assigned to review ${existing.employee.firstName} ${existing.employee.lastName}'s resignation request.`,
-        });
-      }
-      return { kind: 'updated' as const };
-    });
-
-    if (result.kind === 'missing') return reply.code(404).send({ error: 'Resignation application not found.' });
-    if (result.kind === 'not-pending') return reply.code(409).send({ error: 'Only pending resignation applications can be assigned.' });
-    if (result.kind === 'invalid-assignee') return reply.code(400).send({ error: 'The selected reviewer is not an active administrator.' });
-    return { success: true as const };
   });
 
   app.patch('/:id/checklist/:itemId', async (request, reply) => {

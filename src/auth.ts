@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, or } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { db } from './db/index.js';
 import { employees, sessions, users } from './db/schema.js';
@@ -17,7 +17,6 @@ export interface PublicUser {
   role: 'admin' | 'employee';
   phone: string;
   dateOfBirth: string | null;
-  isOwner: boolean;
   onboardingComplete: boolean;
   avatar: string;
   designation: string;
@@ -33,7 +32,6 @@ function toPublicUser(user: typeof users.$inferSelect, onboardingComplete = true
     role: user.role,
     phone: user.phone,
     dateOfBirth: user.dateOfBirth,
-    isOwner: user.isOwner,
     onboardingComplete,
     avatar: user.avatar ?? '/favicon.svg',
     designation: user.designation,
@@ -101,6 +99,7 @@ async function authenticateRequest(request: FastifyRequest): Promise<PublicUser 
       eq(sessions.tokenHash, hashToken(token)),
       gt(sessions.expiresAt, new Date()),
       eq(users.isActive, true),
+      or(eq(users.role, 'employee'), and(eq(users.role, 'admin'), eq(users.isOwner, true))),
     ))
     .limit(1);
 
@@ -132,7 +131,7 @@ export async function verifyCredentials(
     .where(eq(users.email, email.toLowerCase()))
     .limit(1);
 
-  if (!user || !user.isActive) return null;
+  if (!user || !user.isActive || (user.role === 'admin' && !user.isOwner)) return null;
   if (!(await bcrypt.compare(password, user.passwordHash))) return null;
 
   if (user.role === 'employee') {
