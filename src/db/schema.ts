@@ -94,7 +94,7 @@ export const employeeDocuments = pgTable('employee_documents', {
   id: uuid('id').defaultRandom().primaryKey(),
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
   documentType: text('document_type', {
-    enum: ['offer_letter', 'education_certificate', 'government_id'],
+    enum: ['offer_letter', 'education_certificate', 'government_id', 'bond_agreement', 'nda'],
   }).notNull(),
   fileName: text('file_name').notNull(),
   contentType: text('content_type').notNull(),

@@ -14,9 +14,12 @@ const passwordSchema = z.string().min(12).max(128).refine(
   password => Buffer.byteLength(password, 'utf8') <= 72,
   'Password must not exceed 72 UTF-8 bytes.',
 );
-const onboardingBodyLimit = 22 * 1024 * 1024;
+const onboardingBodyLimit = 36 * 1024 * 1024;
+const documentTypes = ['offer_letter', 'education_certificate', 'government_id', 'bond_agreement', 'nda'] as const;
+const requiredDocumentTypes = ['offer_letter', 'education_certificate', 'government_id'] as const;
+const optionalDocumentTypes = ['bond_agreement', 'nda'] as const;
 const documentSchema = z.object({
-  documentType: z.enum(['offer_letter', 'education_certificate', 'government_id']),
+  documentType: z.enum(documentTypes),
   fileName: z.string().trim().min(1).max(180),
   contentType: z.enum(['application/pdf', 'image/jpeg', 'image/png']),
   data: z.string().min(1).max(7_000_000).regex(/^[A-Za-z0-9+/]+={0,2}$/),
@@ -30,8 +33,12 @@ const onboardingSchema = z.object({
         && value < new Date().toISOString().slice(0, 10);
   }),
   phone: z.string().trim().min(7).max(30).regex(/^[+\d()\-\s.]+$/).refine(value => value.replace(/\D/g, '').length >= 7),
-  documents: z.array(documentSchema).length(3).refine(
-    documents => new Set(documents.map(document => document.documentType)).size === 3,
+  documents: z.array(documentSchema).max(documentTypes.length).default([]).refine(
+    documents => new Set(documents.map(document => document.documentType)).size === documents.length,
+    'Each document type can only be uploaded once.',
+  ).refine(
+    documents => requiredDocumentTypes.every(type => documents.some(document => document.documentType === type)),
+    'Upload the offer letter, education certificates, and government ID.',
   ),
 });
 const completeSetupSchema = z.object({
@@ -79,8 +86,8 @@ function decodeDocuments(documents: z.infer<typeof documentSchema>[]) {
       content,
     };
   });
-  if (rows.reduce((total, row) => total + row.content.length, 0) > 15 * 1024 * 1024) {
-    throw new Error('The combined document size must not exceed 15 MB.');
+  if (rows.reduce((total, row) => total + row.content.length, 0) > 25 * 1024 * 1024) {
+    throw new Error('The combined document size must not exceed 25 MB.');
   }
   return rows;
 }
@@ -234,7 +241,7 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
     if (!user) return reply;
     if (user.role !== 'employee') return reply.code(403).send({ error: 'Employee access required.' });
     const parsed = onboardingSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Provide your full name, a valid date of birth and phone number, and all three supported documents.' });
+    if (!parsed.success) return reply.code(400).send({ error: 'Provide your full name, a valid date of birth and phone number, and valid optional documents.' });
     let documents: ReturnType<typeof decodeDocuments>;
     try {
       documents = decodeDocuments(parsed.data.documents);
@@ -308,7 +315,7 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
     if (user.role !== 'employee') return reply.code(403).send({ error: 'Employee access required.' });
 
     const params = z.object({
-      documentType: z.enum(['offer_letter', 'education_certificate', 'government_id']),
+      documentType: z.enum(documentTypes),
     }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Invalid document type.' });
     const parsed = documentSchema.safeParse(request.body);
@@ -353,6 +360,29 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
     return { document: updated };
   });
 
+  app.delete('/my-documents/:documentType', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await getUser(request, reply);
+    if (!user) return reply;
+    if (user.role !== 'employee') return reply.code(403).send({ error: 'Employee access required.' });
+
+    const params = z.object({ documentType: z.enum(optionalDocumentTypes) }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid document type.' });
+    const [employee] = await db.select({ id: employees.id, onboardingComplete: employees.onboardingComplete })
+      .from(employees).where(eq(employees.userId, user.id)).limit(1);
+    if (!employee) return reply.code(404).send({ error: 'Your employee profile could not be found.' });
+    if (!employee.onboardingComplete) {
+      return reply.code(403).send({ error: 'Complete onboarding before changing your documents.' });
+    }
+
+    const [deleted] = await db.delete(employeeDocuments).where(and(
+      eq(employeeDocuments.employeeId, employee.id),
+      eq(employeeDocuments.documentType, params.data.documentType),
+    )).returning({ id: employeeDocuments.id });
+    if (!deleted) return reply.code(404).send({ error: 'This document has not been uploaded.' });
+    return reply.code(204).send();
+  });
+
   app.get('/employees/:employeeId/documents', async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const admin = await getUser(request, reply);
@@ -395,7 +425,7 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
   }, async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const parsed = completeSetupSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Provide a valid access token, password, employee details, and all three required documents.' });
+    if (!parsed.success) return reply.code(400).send({ error: 'Provide a valid access token, password, employee details, and valid optional documents.' });
     let documents: ReturnType<typeof decodeDocuments>;
     try {
       documents = decodeDocuments(parsed.data.documents);
