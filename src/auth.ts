@@ -22,6 +22,7 @@ export interface PublicUser {
   designation: string;
   department: string;
   location: string;
+  salesAccess: boolean;
 }
 
 function toPublicUser(user: typeof users.$inferSelect, onboardingComplete = true): PublicUser {
@@ -37,6 +38,7 @@ function toPublicUser(user: typeof users.$inferSelect, onboardingComplete = true
     designation: user.designation,
     department: user.department,
     location: user.location,
+    salesAccess: user.role === 'admin' || user.salesAccess,
   };
 }
 

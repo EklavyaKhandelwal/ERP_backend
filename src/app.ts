@@ -17,6 +17,7 @@ import { registerDashboardRoutes } from './routes/dashboard.js';
 import { registerAttendanceRoutes } from './routes/attendance.js';
 import { pool } from './db/index.js';
 import { authenticate } from './auth.js';
+import { registerSalesRoutes } from './routes/sales.js';
 
 export function buildApp() {
   const app = Fastify({
@@ -56,6 +57,7 @@ export function buildApp() {
   app.register(registerResignationRoutes, { prefix: '/api/resignations' });
   app.register(registerDashboardRoutes, { prefix: '/api/dashboard' });
   app.register(registerAttendanceRoutes, { prefix: '/api/attendance' });
+  app.register(registerSalesRoutes, { prefix: '/api/sales' });
   registerResignationEscalation(app);
   app.addHook('onClose', async () => {
     await pool.end();

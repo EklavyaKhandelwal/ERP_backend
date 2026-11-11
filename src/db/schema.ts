@@ -27,6 +27,7 @@ export const users = pgTable('users', {
   designation: text('designation').notNull().default('Team member'),
   location: text('location').notNull().default('Remote'),
   avatar: text('avatar'),
+  salesAccess: boolean('sales_access').notNull().default(false),
   isOwner: boolean('is_owner').notNull().default(false),
   hasCompletedSetup: boolean('has_completed_setup').notNull().default(true),
   isActive: boolean('is_active').notNull().default(true),
@@ -464,6 +465,90 @@ export const resignationChecklistItems = pgTable('resignation_checklist_items', 
   uniqueIndex('resignation_checklist_application_item_idx').on(table.resignationId, table.itemKey),
   index('resignation_checklist_application_idx').on(table.resignationId),
 ]);
+
+export const salesAccounts = pgTable('sales_accounts', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  companyName: text('company_name').notNull(),
+  industry: text('industry').notNull().default(''),
+  website: text('website').notNull().default(''),
+  linkedinUrl: text('linkedin_url').notNull().default(''),
+  location: text('location').notNull().default(''),
+  ownerEmployeeId: uuid('owner_employee_id').notNull().references(() => employees.id, { onDelete: 'restrict' }),
+  status: text('status', { enum: ['Prospect', 'Active'] }).notNull().default('Prospect'),
+  createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('sales_accounts_owner_status_idx').on(table.ownerEmployeeId, table.status),
+  index('sales_accounts_name_idx').on(table.companyName),
+]);
+
+export const salesTechnologies = pgTable('sales_technologies', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: uuid('account_id').notNull().references(() => salesAccounts.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [uniqueIndex('sales_technologies_account_name_idx').on(table.accountId, table.name)]);
+
+export const salesContacts = pgTable('sales_contacts', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: uuid('account_id').notNull().references(() => salesAccounts.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  designation: text('designation').notNull().default(''),
+  email: text('email').notNull().default(''),
+  phone: text('phone').notNull().default(''),
+  linkedinUrl: text('linkedin_url').notNull().default(''),
+  status: text('status', { enum: ['Active', 'Inactive'] }).notNull().default('Active'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [index('sales_contacts_account_idx').on(table.accountId)]);
+
+export const salesActivities = pgTable('sales_activities', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: uuid('account_id').notNull().references(() => salesAccounts.id, { onDelete: 'cascade' }),
+  contactId: uuid('contact_id').references(() => salesContacts.id, { onDelete: 'set null' }),
+  type: text('type', { enum: ['Call', 'Email', 'Meeting', 'LinkedIn outreach', 'Follow-up'] }).notNull(),
+  activityDate: date('activity_date', { mode: 'string' }).notNull(),
+  remarks: text('remarks').notNull(),
+  nextFollowUpDate: date('next_follow_up_date', { mode: 'string' }),
+  createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [index('sales_activities_account_date_idx').on(table.accountId, table.activityDate)]);
+
+export const salesLeads = pgTable('sales_leads', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: uuid('account_id').notNull().references(() => salesAccounts.id, { onDelete: 'cascade' }),
+  contactId: uuid('contact_id').references(() => salesContacts.id, { onDelete: 'set null' }),
+  name: text('name').notNull(),
+  serviceInterest: text('service_interest').notNull(),
+  source: text('source').notNull(),
+  status: text('status', { enum: ['New', 'Contacted', 'Qualified', 'Disqualified', 'Converted'] }).notNull().default('New'),
+  assignedEmployeeId: uuid('assigned_employee_id').notNull().references(() => employees.id, { onDelete: 'restrict' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [index('sales_leads_account_idx').on(table.accountId)]);
+
+export const salesOpportunities = pgTable('sales_opportunities', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: uuid('account_id').notNull().references(() => salesAccounts.id, { onDelete: 'cascade' }),
+  contactId: uuid('contact_id').references(() => salesContacts.id, { onDelete: 'set null' }),
+  name: text('name').notNull(),
+  serviceRequired: text('service_required').notNull(),
+  stage: text('stage', { enum: ['Prospecting', 'Qualification', 'Proposal', 'Negotiation', 'Won', 'Lost'] }).notNull().default('Prospecting'),
+  expectedClosingDate: date('expected_closing_date', { mode: 'string' }),
+  notes: text('notes').notNull().default(''),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [index('sales_opportunities_account_idx').on(table.accountId)]);
+
+export const salesNotes = pgTable('sales_notes', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: uuid('account_id').notNull().references(() => salesAccounts.id, { onDelete: 'cascade' }),
+  content: text('content').notNull(),
+  createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [index('sales_notes_account_created_idx').on(table.accountId, table.createdAt)]);
 
 export const notifications = pgTable('notifications', {
   id: uuid('id').defaultRandom().primaryKey(),
