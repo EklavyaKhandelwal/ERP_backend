@@ -32,6 +32,7 @@ function toEmployee(
   accountStatus: 'Not set up' | 'Invitation pending' | 'Active' | 'Deactivated' | 'Admin account',
   includeAccountStatus = true,
   leaveBalance?: typeof employeeLeaveBalances.$inferSelect,
+  salesAccess = false,
 ) {
   return {
     id: employee.id,
@@ -53,6 +54,7 @@ function toEmployee(
     location: employee.location,
     manager: employee.manager,
     skills: employee.skills,
+    salesAccess,
     leaveBalance: {
       year: leaveBalance?.year ?? new Date().getFullYear(),
       annual: leaveBalance?.annualBalance ?? employee.annualLeave,
@@ -103,6 +105,7 @@ async function toEmployees(records: EmployeeRecord[], includeAccountStatus = tru
         isActive: users.isActive,
         role: users.role,
         avatar: users.avatar,
+        salesAccess: users.salesAccess,
       }).from(users).where(or(
         inArray(users.id, userIds),
         inArray(users.email, records.map(employee => employee.email.toLowerCase())),
@@ -113,6 +116,7 @@ async function toEmployees(records: EmployeeRecord[], includeAccountStatus = tru
         isActive: users.isActive,
         role: users.role,
         avatar: users.avatar,
+        salesAccess: users.salesAccess,
       }).from(users).where(inArray(users.email, records.map(employee => employee.email.toLowerCase()))),
     unlinkedEmployeeIds.length
       ? db.select({ employeeId: accountAccessTokens.employeeId }).from(accountAccessTokens)
@@ -135,15 +139,16 @@ async function toEmployees(records: EmployeeRecord[], includeAccountStatus = tru
   const balancesByEmployee = new Map(existingBalances.map(balance => [balance.employeeId, balance]));
 
   return records.map(employee => {
-    const linkedUser = employee.userId ? usersById.get(employee.userId) : undefined;
-    const avatarUser = linkedUser ?? usersByEmail.get(employee.email.toLowerCase());
+    const linkedUser = (employee.userId ? usersById.get(employee.userId) : undefined)
+      ?? usersByEmail.get(employee.email.toLowerCase());
+    const avatarUser = linkedUser;
     const accountStatus = linkedUser?.role === 'admin'
       ? 'Admin account'
       : linkedUser
       ? linkedUser.isActive ? 'Active' : 'Deactivated'
       : pendingIds.has(employee.id) ? 'Invitation pending' : 'Not set up';
     return {
-      ...toEmployee(employee, accountStatus, includeAccountStatus, balancesByEmployee.get(employee.id)),
+      ...toEmployee(employee, accountStatus, includeAccountStatus, balancesByEmployee.get(employee.id), linkedUser?.role === 'employee' && linkedUser.isActive && linkedUser.salesAccess),
       avatar: employeeAvatar(employee, avatarUser?.avatar),
     };
   });
