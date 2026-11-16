@@ -13,6 +13,7 @@ const timeZone = z.string().min(1).default('Asia/Kolkata').refine(value => {
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  DATABASE_SSL_CA_PATH: z.string().min(1, 'DATABASE_SSL_CA_PATH is required'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   RESEND_API_KEY: optionalValue,
