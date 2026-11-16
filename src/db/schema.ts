@@ -513,7 +513,10 @@ export const salesActivities = pgTable('sales_activities', {
   nextFollowUpDate: date('next_follow_up_date', { mode: 'string' }),
   createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [index('sales_activities_account_date_idx').on(table.accountId, table.activityDate)]);
+}, table => [
+  index('sales_activities_account_date_idx').on(table.accountId, table.activityDate),
+  index('sales_activities_follow_up_idx').on(table.nextFollowUpDate, table.accountId),
+]);
 
 export const salesLeads = pgTable('sales_leads', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -555,9 +558,13 @@ export const notifications = pgTable('notifications', {
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
   category: text('category'),
+  dedupeKey: text('dedupe_key'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   readAt: timestamp('read_at', { withTimezone: true }),
-}, table => [index('notifications_user_created_idx').on(table.userId, table.createdAt)]);
+}, table => [
+  index('notifications_user_created_idx').on(table.userId, table.createdAt),
+  uniqueIndex('notifications_dedupe_key_idx').on(table.dedupeKey),
+]);
 
 export const notificationPreferences = pgTable('notification_preferences', {
   userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
