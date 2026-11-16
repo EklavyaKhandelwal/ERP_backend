@@ -252,6 +252,35 @@ export async function registerSalesRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
+  app.get('/activity-summary', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const user = await getSalesUser(request, reply);
+    if (!user) return reply;
+
+    const startDate = new Date();
+    startDate.setUTCDate(1);
+    startDate.setUTCMonth(startDate.getUTCMonth() - 23);
+    const fromDate = startDate.toISOString().slice(0, 10);
+    const month = sql<string>`to_char(${salesActivities.activityDate}, 'YYYY-MM')`;
+    const visibilityFilter = user.employeeId
+      ? and(
+        eq(salesAccounts.ownerEmployeeId, user.employeeId),
+        eq(salesActivities.createdByUserId, user.id),
+      )
+      : undefined;
+    const summary = await db.select({
+      month,
+      type: salesActivities.type,
+      count: sql<number>`count(*)::int`,
+    }).from(salesActivities)
+      .innerJoin(salesAccounts, eq(salesActivities.accountId, salesAccounts.id))
+      .where(and(visibilityFilter, gte(salesActivities.activityDate, fromDate)))
+      .groupBy(month, salesActivities.type)
+      .orderBy(asc(month), asc(salesActivities.type));
+
+    return { summary };
+  });
+
   app.get('/contacts', async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const user = await getSalesUser(request, reply);
