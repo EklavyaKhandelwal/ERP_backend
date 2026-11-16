@@ -18,6 +18,7 @@ import { registerAttendanceRoutes } from './routes/attendance.js';
 import { pool } from './db/index.js';
 import { authenticate } from './auth.js';
 import { registerSalesRoutes } from './routes/sales.js';
+import { registerSalesFollowUpNotificationSweep } from './sales-follow-up-notifications.js';
 
 export function buildApp() {
   const app = Fastify({
@@ -59,6 +60,7 @@ export function buildApp() {
   app.register(registerAttendanceRoutes, { prefix: '/api/attendance' });
   app.register(registerSalesRoutes, { prefix: '/api/sales' });
   registerResignationEscalation(app);
+  registerSalesFollowUpNotificationSweep(app);
   app.addHook('onClose', async () => {
     await pool.end();
   });

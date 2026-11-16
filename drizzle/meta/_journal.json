@@ -225,6 +225,13 @@
       "when": 1794851795381,
       "tag": "0031_milky_shiver_man",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794856646256,
+      "tag": "0032_sales_follow_up_notifications",
+      "breakpoints": true
     }
   ]
 }

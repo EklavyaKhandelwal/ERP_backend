@@ -8,6 +8,7 @@ export const notificationCategories = [
   'appraisalCycleUpdates',
   'employeeOnboarding',
   'projectMilestones',
+  'salesFollowUps',
 ] as const;
 
 export type NotificationCategory = typeof notificationCategories[number];
@@ -19,6 +20,7 @@ export const defaultNotificationPreferences: NotificationPreferences = {
   appraisalCycleUpdates: true,
   employeeOnboarding: true,
   projectMilestones: false,
+  salesFollowUps: true,
 };
 
 type NotificationExecutor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -28,6 +30,7 @@ export async function insertUserNotifications(
   recipientIds: string[],
   title: string,
   category?: NotificationCategory,
+  dedupeKey?: string,
 ): Promise<void> {
   if (!recipientIds.length) return;
 
@@ -45,10 +48,17 @@ export async function insertUserNotifications(
   }
 
   if (enabledRecipientIds.length) {
-    await executor.insert(notifications).values(enabledRecipientIds.map(userId => ({
+    const records = enabledRecipientIds.map(userId => ({
       userId,
       title,
       category: category ?? null,
-    })));
+      dedupeKey: dedupeKey ? `${dedupeKey}:${userId}` : null,
+    }));
+    const insert = executor.insert(notifications).values(records);
+    if (dedupeKey) {
+      await insert.onConflictDoNothing({ target: notifications.dedupeKey });
+    } else {
+      await insert;
+    }
   }
 }
