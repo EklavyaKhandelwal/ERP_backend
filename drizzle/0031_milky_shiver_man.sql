@@ -1,0 +1,1 @@
+ALTER TABLE "payroll_records" ALTER COLUMN "other_details" DROP DEFAULT;

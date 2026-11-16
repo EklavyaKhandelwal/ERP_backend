@@ -1,9 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
 import { db } from '../db/index.js';
 import { accountAccessTokens, employeeLeaveBalances, employees, leavePolicies, projectMembers, projects, sessions, users } from '../db/schema.js';
+import { employeeFieldContext } from '../db/encryption-core.js';
+import { decryptNumber, encryptNumber, fieldEncryption } from '../db/field-encryption.js';
 
 const employeeStatus = z.enum(['Active', 'On Leave', 'Probation', 'Inactive']);
 const employeeInput = z.object({
@@ -48,9 +51,12 @@ function toEmployee(
     designation: employee.designation,
     joinDate: employee.joinDate,
     status: employee.status,
-    salary: employee.salary,
-    bankName: employee.bankName,
-    bankAccountNumber: employee.bankAccountNumber,
+    salary: decryptNumber(employee.salary, employeeFieldContext(employee.id, 'salary')),
+    bankName: fieldEncryption.decryptText(employee.bankName, employeeFieldContext(employee.id, 'bankName')),
+    bankAccountNumber: fieldEncryption.decryptText(
+      employee.bankAccountNumber,
+      employeeFieldContext(employee.id, 'bankAccountNumber'),
+    ),
     location: employee.location,
     manager: employee.manager,
     skills: employee.skills,
@@ -233,9 +239,12 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Invalid employee ID.' });
 
-    const [employee] = await db.select({ id: employees.id }).from(employees)
+    const [employee] = await db.select({ id: employees.id, userId: employees.userId }).from(employees)
       .where(eq(employees.id, params.data.id)).limit(1);
     if (!employee) return reply.code(404).send({ error: 'Employee not found.' });
+    if (user.role !== 'admin' && employee.userId !== user.id) {
+      return reply.code(403).send({ error: 'Administrator access required.' });
+    }
 
     const assignedProjects = await db.select({
       id: projects.id,
@@ -310,10 +319,18 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
       const annualDays = leavePolicy?.annualDays ?? 20;
       const sickDays = leavePolicy?.sickDays ?? 10;
       const casualDays = leavePolicy?.casualDays ?? 6;
+      const employeeId = randomUUID();
       const record = await db.transaction(async tx => {
         const [created] = await tx.insert(employees).values({
+          id: employeeId,
           ...data,
           email: data.email.toLowerCase(),
+          salary: encryptNumber(data.salary, employeeFieldContext(employeeId, 'salary')),
+          bankName: fieldEncryption.encryptText(data.bankName, employeeFieldContext(employeeId, 'bankName')),
+          bankAccountNumber: fieldEncryption.encryptText(
+            data.bankAccountNumber,
+            employeeFieldContext(employeeId, 'bankAccountNumber'),
+          ),
           userId: matchingUser?.id ?? null,
           avatar: data.avatar === '/favicon.svg' ? matchingUser?.avatar ?? data.avatar : data.avatar,
           annualLeave: annualDays,
@@ -381,9 +398,24 @@ export async function registerEmployeeRoutes(app: FastifyInstance): Promise<void
     try {
       const record = await db.transaction(async tx => {
         const now = new Date();
+        const { salary, bankName, bankAccountNumber, ...otherData } = data;
         const [updated] = await tx.update(employees)
           .set({
-            ...data,
+            ...otherData,
+            ...(salary !== undefined
+              ? { salary: encryptNumber(salary, employeeFieldContext(params.data.id, 'salary')) }
+              : {}),
+            ...(bankName !== undefined
+              ? { bankName: fieldEncryption.encryptText(bankName, employeeFieldContext(params.data.id, 'bankName')) }
+              : {}),
+            ...(bankAccountNumber !== undefined
+              ? {
+                bankAccountNumber: fieldEncryption.encryptText(
+                  bankAccountNumber,
+                  employeeFieldContext(params.data.id, 'bankAccountNumber'),
+                ),
+              }
+              : {}),
             ...(data.email ? { email: data.email.toLowerCase() } : {}),
             updatedAt: now,
           })

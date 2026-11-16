@@ -3,6 +3,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
 import { db } from '../db/index.js';
+import { payrollFieldContext } from '../db/encryption-core.js';
+import { decryptNumber } from '../db/field-encryption.js';
 import {
   employees,
   employeeLeaveBalances,
@@ -221,6 +223,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         .groupBy(timesheets.id)
         .limit(1),
       db.select({
+        id: payrollRecords.id,
         period: payrollRuns.payPeriod,
         netPay: payrollRecords.netPay,
         status: payrollRecords.status,
@@ -274,7 +277,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       payslip: payslip ? {
         month: new Date(`${payslip.period}T00:00:00.000Z`).toLocaleString('en', { month: 'long', timeZone: 'UTC' }),
         year: Number(payslip.period.slice(0, 4)),
-        netPay: payslip.netPay,
+        netPay: decryptNumber(payslip.netPay, payrollFieldContext(payslip.id, 'netPay')),
         status: payslip.status,
       } : null,
     };
@@ -288,7 +291,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
     const query = z.object({ today: z.string().date() }).safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Provide today as a valid calendar date.' });
     const { today } = query.data;
-    const [employeeRows, projectRows, pendingLeaveCount, pendingLeaves, upcomingLeaves, pendingTimesheetCount, pendingTimesheets, payrollRows, birthdays] = await Promise.all([
+    const [employeeRows, projectRows, pendingLeaveCount, pendingLeaves, upcomingLeaves, pendingTimesheetCount, pendingTimesheets, birthdays] = await Promise.all([
       db.select({
         department: employees.department,
         status: employees.status,
@@ -341,16 +344,6 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         .orderBy(sql`${timesheets.submittedOn} desc nulls last`, desc(timesheets.weekStart))
         .limit(5),
       db.select({
-        period: payrollRuns.payPeriod,
-        netPay: sql<number>`coalesce(sum(${payrollRecords.netPay}), 0)::float`,
-      })
-        .from(payrollRuns)
-        .innerJoin(payrollRecords, eq(payrollRecords.runId, payrollRuns.id))
-        .where(eq(payrollRecords.payslipStatus, 'Published'))
-        .groupBy(payrollRuns.payPeriod)
-        .orderBy(desc(payrollRuns.payPeriod))
-        .limit(1),
-      db.select({
         id: employees.id,
         name: sql<string>`concat(${employees.firstName}, ' ', ${employees.lastName})`,
         avatar: employees.avatar,
@@ -364,6 +357,32 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         ))
         .orderBy(asc(employees.firstName), asc(employees.lastName)),
     ]);
+
+    const [latestPayrollPeriod] = await db.select({ period: payrollRuns.payPeriod })
+      .from(payrollRuns)
+      .innerJoin(payrollRecords, eq(payrollRecords.runId, payrollRuns.id))
+      .where(eq(payrollRecords.payslipStatus, 'Published'))
+      .orderBy(desc(payrollRuns.payPeriod))
+      .limit(1);
+    let latestPayroll: { period: string; netPay: number } | undefined;
+    if (latestPayrollPeriod) {
+      const payrollRows = await db.select({
+        id: payrollRecords.id,
+        netPay: payrollRecords.netPay,
+      })
+        .from(payrollRecords)
+        .innerJoin(payrollRuns, eq(payrollRecords.runId, payrollRuns.id))
+        .where(and(
+          eq(payrollRuns.payPeriod, latestPayrollPeriod.period),
+          eq(payrollRecords.payslipStatus, 'Published'),
+        ));
+      latestPayroll = {
+        period: latestPayrollPeriod.period,
+        netPay: payrollRows.reduce((cents, record) => (
+          cents + Math.round(decryptNumber(record.netPay, payrollFieldContext(record.id, 'netPay')) * 100)
+        ), 0) / 100,
+      };
+    }
 
     const departmentCounts = new Map<string, number>();
     let employeeCount = 0;
@@ -379,7 +398,6 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
     const activeProjectProgress = projectRows.map(project => (
       project.totalTasks > 0 ? Math.round((project.completedTasks / project.totalTasks) * 100) : 0
     ));
-    const [latestPayroll] = payrollRows;
     const [pendingLeavesTotal] = pendingLeaveCount;
     const [pendingTimesheetsTotal] = pendingTimesheetCount;
 

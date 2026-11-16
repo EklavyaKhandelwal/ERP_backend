@@ -1,9 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
 import { db } from '../db/index.js';
 import { employees, notifications, payrollRecordRevisions, payrollRecords, payrollRuns } from '../db/schema.js';
+import {
+  employeeFieldContext,
+  payrollFieldContext,
+  payrollMoneyFields,
+  payrollTextFields,
+} from '../db/encryption-core.js';
+import { decryptNumber, encryptNumber, fieldEncryption } from '../db/field-encryption.js';
 
 const amount = z.number().finite().min(0).max(1_000_000_000).multipleOf(0.01);
 const runSchema = z.object({
@@ -58,6 +66,95 @@ async function getUser(request: FastifyRequest, reply: FastifyReply): Promise<Pu
   return user;
 }
 
+function decryptPayrollAmounts(record: typeof payrollRecords.$inferSelect) {
+  return {
+    basicSalaryMaster: decryptNumber(record.basicSalaryMaster, payrollFieldContext(record.id, 'basicSalaryMaster')),
+    hraMaster: decryptNumber(record.hraMaster, payrollFieldContext(record.id, 'hraMaster')),
+    specialAllowanceMaster: decryptNumber(
+      record.specialAllowanceMaster,
+      payrollFieldContext(record.id, 'specialAllowanceMaster'),
+    ),
+    bonusMaster: decryptNumber(record.bonusMaster, payrollFieldContext(record.id, 'bonusMaster')),
+    basicSalary: decryptNumber(record.basicSalary, payrollFieldContext(record.id, 'basicSalary')),
+    hra: decryptNumber(record.hra, payrollFieldContext(record.id, 'hra')),
+    specialAllowance: decryptNumber(record.specialAllowance, payrollFieldContext(record.id, 'specialAllowance')),
+    bonus: decryptNumber(record.bonus, payrollFieldContext(record.id, 'bonus')),
+    providentFund: decryptNumber(record.providentFund, payrollFieldContext(record.id, 'providentFund')),
+    professionalTax: decryptNumber(record.professionalTax, payrollFieldContext(record.id, 'professionalTax')),
+    incomeTax: decryptNumber(record.incomeTax, payrollFieldContext(record.id, 'incomeTax')),
+    totalEarnings: decryptNumber(record.totalEarnings, payrollFieldContext(record.id, 'totalEarnings')),
+    totalDeductions: decryptNumber(record.totalDeductions, payrollFieldContext(record.id, 'totalDeductions')),
+    netPay: decryptNumber(record.netPay, payrollFieldContext(record.id, 'netPay')),
+  };
+}
+
+function decryptPayrollTextFields(record: typeof payrollRecords.$inferSelect) {
+  return {
+    bankName: fieldEncryption.decryptText(record.bankName, payrollFieldContext(record.id, 'bankName')),
+    bankAccountNumber: fieldEncryption.decryptText(
+      record.bankAccountNumber,
+      payrollFieldContext(record.id, 'bankAccountNumber'),
+    ),
+    panNumber: fieldEncryption.decryptText(record.panNumber, payrollFieldContext(record.id, 'panNumber')),
+    providentFundNumber: fieldEncryption.decryptText(
+      record.providentFundNumber,
+      payrollFieldContext(record.id, 'providentFundNumber'),
+    ),
+    providentFundUan: fieldEncryption.decryptText(
+      record.providentFundUan,
+      payrollFieldContext(record.id, 'providentFundUan'),
+    ),
+    otherDetails: fieldEncryption.decryptText(record.otherDetails, payrollFieldContext(record.id, 'otherDetails')),
+  };
+}
+
+type PayrollMoneyInput = Record<typeof payrollMoneyFields[number], number>;
+type PayrollMoneyStorage = Record<typeof payrollMoneyFields[number], string>;
+type PayrollTextInput = Record<typeof payrollTextFields[number], string>;
+type PayrollTextStorage = Record<typeof payrollTextFields[number], string>;
+
+function encryptPayrollAmounts(values: PayrollMoneyInput, recordId: string): PayrollMoneyStorage {
+  return {
+    basicSalaryMaster: encryptNumber(values.basicSalaryMaster, payrollFieldContext(recordId, 'basicSalaryMaster')),
+    hraMaster: encryptNumber(values.hraMaster, payrollFieldContext(recordId, 'hraMaster')),
+    specialAllowanceMaster: encryptNumber(
+      values.specialAllowanceMaster,
+      payrollFieldContext(recordId, 'specialAllowanceMaster'),
+    ),
+    bonusMaster: encryptNumber(values.bonusMaster, payrollFieldContext(recordId, 'bonusMaster')),
+    basicSalary: encryptNumber(values.basicSalary, payrollFieldContext(recordId, 'basicSalary')),
+    hra: encryptNumber(values.hra, payrollFieldContext(recordId, 'hra')),
+    specialAllowance: encryptNumber(values.specialAllowance, payrollFieldContext(recordId, 'specialAllowance')),
+    bonus: encryptNumber(values.bonus, payrollFieldContext(recordId, 'bonus')),
+    providentFund: encryptNumber(values.providentFund, payrollFieldContext(recordId, 'providentFund')),
+    professionalTax: encryptNumber(values.professionalTax, payrollFieldContext(recordId, 'professionalTax')),
+    incomeTax: encryptNumber(values.incomeTax, payrollFieldContext(recordId, 'incomeTax')),
+    totalEarnings: encryptNumber(values.totalEarnings, payrollFieldContext(recordId, 'totalEarnings')),
+    totalDeductions: encryptNumber(values.totalDeductions, payrollFieldContext(recordId, 'totalDeductions')),
+    netPay: encryptNumber(values.netPay, payrollFieldContext(recordId, 'netPay')),
+  };
+}
+
+function encryptPayrollTextFields(values: PayrollTextInput, recordId: string): PayrollTextStorage {
+  return {
+    bankName: fieldEncryption.encryptText(values.bankName, payrollFieldContext(recordId, 'bankName')),
+    bankAccountNumber: fieldEncryption.encryptText(
+      values.bankAccountNumber,
+      payrollFieldContext(recordId, 'bankAccountNumber'),
+    ),
+    panNumber: fieldEncryption.encryptText(values.panNumber, payrollFieldContext(recordId, 'panNumber')),
+    providentFundNumber: fieldEncryption.encryptText(
+      values.providentFundNumber,
+      payrollFieldContext(recordId, 'providentFundNumber'),
+    ),
+    providentFundUan: fieldEncryption.encryptText(
+      values.providentFundUan,
+      payrollFieldContext(recordId, 'providentFundUan'),
+    ),
+    otherDetails: fieldEncryption.encryptText(values.otherDetails, payrollFieldContext(recordId, 'otherDetails')),
+  };
+}
+
 async function shapeRecords(records: Array<typeof payrollRecords.$inferSelect>) {
   if (!records.length) return [];
   const employeeIds = [...new Set(records.map(record => record.employeeId))];
@@ -85,28 +182,10 @@ async function shapeRecords(records: Array<typeof payrollRecords.$inferSelect>) 
       location: employee.location,
       month: new Date(Date.UTC(year, monthNumber - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' }),
       year,
-      basicSalaryMaster: record.basicSalaryMaster,
-      hraMaster: record.hraMaster,
-      specialAllowanceMaster: record.specialAllowanceMaster,
-      bonusMaster: record.bonusMaster,
-      basicSalary: record.basicSalary,
-      hra: record.hra,
-      specialAllowance: record.specialAllowance,
-      bonus: record.bonus,
-      providentFund: record.providentFund,
-      professionalTax: record.professionalTax,
-      incomeTax: record.incomeTax,
-      totalEarnings: record.totalEarnings,
-      totalDeductions: record.totalDeductions,
-      netPay: record.netPay,
+      ...decryptPayrollAmounts(record),
       effectiveWorkDays: record.effectiveWorkDays,
       lossOfPayDays: record.lossOfPayDays,
-      bankName: record.bankName,
-      bankAccountNumber: record.bankAccountNumber,
-      panNumber: record.panNumber,
-      providentFundNumber: record.providentFundNumber,
-      providentFundUan: record.providentFundUan,
-      otherDetails: record.otherDetails,
+      ...decryptPayrollTextFields(record),
       payslipStatus: record.payslipStatus,
       revision: record.revision,
       ...(record.publishedAt ? { publishedAt: record.publishedAt.toISOString() } : {}),
@@ -212,27 +291,37 @@ export async function registerPayrollRoutes(app: FastifyInstance): Promise<void>
           createdByUserId: user.id,
         }).returning();
         return tx.insert(payrollRecords).values(records.map(record => {
+          const recordId = randomUUID();
+          const employee = employeeById.get(record.employeeId);
+          if (!employee) throw new Error(`Employee ${record.employeeId} was not available for payroll creation.`);
           const totalEarnings = (cents(record.basicSalary) + cents(record.hra) + cents(record.specialAllowance) + cents(record.bonus)) / 100;
           const totalDeductions = (cents(record.providentFund) + cents(record.professionalTax) + cents(record.incomeTax)) / 100;
-          return {
-            runId: run.id,
-            employeeId: record.employeeId,
-            bankName: employeeById.get(record.employeeId)!.bankName,
-            bankAccountNumber: employeeById.get(record.employeeId)!.bankAccountNumber,
-            basicSalaryMaster: record.basicSalaryMaster,
-            hraMaster: record.hraMaster,
-            specialAllowanceMaster: record.specialAllowanceMaster,
-            bonusMaster: record.bonusMaster,
-            basicSalary: record.basicSalary,
-            hra: record.hra,
-            specialAllowance: record.specialAllowance,
-            bonus: record.bonus,
-            providentFund: record.providentFund,
-            professionalTax: record.professionalTax,
-            incomeTax: record.incomeTax,
+          const amounts = {
+            ...record,
             totalEarnings,
             totalDeductions,
             netPay: totalEarnings - totalDeductions,
+          };
+          const identifiers = {
+            bankName: fieldEncryption.decryptText(
+              employee.bankName,
+              employeeFieldContext(employee.id, 'bankName'),
+            ),
+            bankAccountNumber: fieldEncryption.decryptText(
+              employee.bankAccountNumber,
+              employeeFieldContext(employee.id, 'bankAccountNumber'),
+            ),
+            panNumber: '',
+            providentFundNumber: '',
+            providentFundUan: '',
+            otherDetails: '',
+          };
+          return {
+            id: recordId,
+            runId: run.id,
+            employeeId: record.employeeId,
+            ...encryptPayrollAmounts(amounts, recordId),
+            ...encryptPayrollTextFields(identifiers, recordId),
             effectiveWorkDays,
             status: 'Pending' as const,
           };
@@ -298,10 +387,15 @@ export async function registerPayrollRoutes(app: FastifyInstance): Promise<void>
         });
       }
       const [record] = await tx.update(payrollRecords).set({
-        ...updates,
-        totalEarnings,
-        totalDeductions,
-        netPay: totalEarnings - totalDeductions,
+        ...encryptPayrollAmounts({
+          ...updates,
+          totalEarnings,
+          totalDeductions,
+          netPay: totalEarnings - totalDeductions,
+        }, current.id),
+        ...encryptPayrollTextFields(updates, current.id),
+        effectiveWorkDays: updates.effectiveWorkDays,
+        lossOfPayDays: updates.lossOfPayDays,
         revision: current.payslipStatus === 'Published' ? current.revision + 1 : current.revision,
         updatedAt: new Date(),
       }).where(eq(payrollRecords.id, current.id)).returning();

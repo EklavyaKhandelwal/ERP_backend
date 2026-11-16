@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { and, eq, gt, isNull } from 'drizzle-orm';
+import { and, eq, gt, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type PublicUser } from '../auth.js';
@@ -9,6 +9,8 @@ import { accountAccessTokens, employeeDocuments, employees, passwordResetTokens,
 import { isEmployeeAccessEmailConfigured, sendEmployeeAccessEmail } from '../email.js';
 import { env } from '../env.js';
 import { insertUserNotifications } from '../notifications.js';
+import { employeeDocumentContext } from '../db/encryption-core.js';
+import { fieldEncryption } from '../db/field-encryption.js';
 
 const passwordSchema = z.string().min(12).max(128).refine(
   password => Buffer.byteLength(password, 'utf8') <= 72,
@@ -116,16 +118,21 @@ async function saveOnboarding(
     await tx.update(users).set({ name: input.fullName.trim(), updatedAt: now })
       .where(eq(users.id, employee.userId));
   }
-  await tx.insert(employeeDocuments).values(documents.map(document => ({
+  const encryptedDocuments = documents.map(document => ({
     ...document,
     employeeId: employee.id,
+    content: fieldEncryption.encryptBytes(
+      document.content,
+      employeeDocumentContext(employee.id, document.documentType),
+    ),
     uploadedAt: now,
-  }))).onConflictDoUpdate({
+  }));
+  await tx.insert(employeeDocuments).values(encryptedDocuments).onConflictDoUpdate({
     target: [employeeDocuments.employeeId, employeeDocuments.documentType],
     set: {
-      fileName: employeeDocuments.fileName,
-      contentType: employeeDocuments.contentType,
-      content: employeeDocuments.content,
+      fileName: sql.raw('excluded.file_name'),
+      contentType: sql.raw('excluded.content_type'),
+      content: sql.raw('excluded.content'),
       uploadedAt: now,
     },
   });
@@ -305,7 +312,10 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
       .header('x-content-type-options', 'nosniff')
       .header('content-security-policy', "sandbox; default-src 'none'")
       .header('referrer-policy', 'no-referrer')
-      .send(document.content);
+      .send(fieldEncryption.decryptBytes(
+        document.content,
+        employeeDocumentContext(employee.id, document.documentType),
+      ));
   });
 
   app.put('/my-documents/:documentType', { bodyLimit: 7_100_000 }, async (request, reply) => {
@@ -338,8 +348,13 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
       return reply.code(403).send({ error: 'Complete onboarding before changing your documents.' });
     }
 
+    const encryptedContent = fieldEncryption.encryptBytes(
+      document.content,
+      employeeDocumentContext(employee.id, document.documentType),
+    );
     const [updated] = await db.insert(employeeDocuments).values({
       ...document,
+      content: encryptedContent,
       employeeId: employee.id,
       uploadedAt: new Date(),
     }).onConflictDoUpdate({
@@ -347,7 +362,7 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
       set: {
         fileName: document.fileName,
         contentType: document.contentType,
-        content: document.content,
+        content: encryptedContent,
         uploadedAt: new Date(),
       },
     }).returning({
@@ -416,7 +431,10 @@ export async function registerAccountRoutes(app: FastifyInstance): Promise<void>
       .header('content-type', document.contentType)
       .header('content-disposition', `attachment; filename="document"; filename*=UTF-8''${encodeURIComponent(document.fileName)}`)
       .header('x-content-type-options', 'nosniff')
-      .send(document.content);
+      .send(fieldEncryption.decryptBytes(
+        document.content,
+        employeeDocumentContext(params.data.employeeId, document.documentType),
+      ));
   });
 
   app.post('/complete-setup', {

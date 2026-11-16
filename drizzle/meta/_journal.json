@@ -211,6 +211,20 @@
       "when": 1794403982835,
       "tag": "0029_silent_ink",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1794851601432,
+      "tag": "0030_reflective_toad_men",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794851795381,
+      "tag": "0031_milky_shiver_man",
+      "breakpoints": true
     }
   ]
 }

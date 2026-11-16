@@ -1,9 +1,12 @@
 import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from './index.js';
 import { employeeLeaveBalances, employees, leavePolicies, users } from './schema.js';
+import { employeeFieldContext } from './encryption-core.js';
+import { encryptNumber, fieldEncryption } from './field-encryption.js';
 
 const seedSchema = z.object({
   SEED_USER_EMAIL: z.string().email(),
@@ -63,12 +66,17 @@ if (!linkedEmployee) {
   const annualDays = policy?.annualDays ?? 20;
   const sickDays = policy?.sickDays ?? 10;
   const casualDays = policy?.casualDays ?? 6;
+  const employeeId = randomUUID();
   await db.transaction(async tx => {
     const [employee] = await tx.insert(employees).values({
+      id: employeeId,
       userId: user.id,
       firstName,
       lastName: lastNameParts.join(' ') || firstName,
       email,
+      salary: encryptNumber(0, employeeFieldContext(employeeId, 'salary')),
+      bankName: fieldEncryption.encryptText('', employeeFieldContext(employeeId, 'bankName')),
+      bankAccountNumber: fieldEncryption.encryptText('', employeeFieldContext(employeeId, 'bankAccountNumber')),
       department: config.SEED_USER_DEPARTMENT,
       designation: config.SEED_USER_DESIGNATION,
       joinDate: new Date().toISOString().slice(0, 10),
